@@ -23,6 +23,7 @@ const STYLES = `
   .badge.reauth_needed { background: #dc262633; color: #dc2626; }
   button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid #8886; background: #8881; cursor: pointer; }
   button.primary { background: #2563eb; border-color: #2563eb; color: white; }
+  button.danger { background: transparent; border-color: #dc2626; color: #dc2626; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid #8884; }
@@ -112,6 +113,10 @@ export function dashboardPage(data: DashboardData): string {
         <div class="row">
           <form method="post" action="/connections/${encodeURIComponent(c.id)}/reauth">
             <button class="primary" type="submit">Reconnect</button>
+          </form>
+          <form method="post" action="/connections/${encodeURIComponent(c.id)}/delete"
+            onsubmit="return confirm('Delete this connection and its account mappings?')">
+            <button class="danger" type="submit">Delete</button>
           </form>
         </div>
       </div>`;

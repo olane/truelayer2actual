@@ -5,8 +5,8 @@ import express, {
   type Request,
   type Response,
 } from 'express';
-import { loadAllConnections, getConnection } from '../auth/tokens.js';
-import { loadConfig } from '../config.js';
+import { loadAllConnections, getConnection, deleteConnection } from '../auth/tokens.js';
+import { loadConfig, removeAccountsForConnection } from '../config.js';
 import { withActual, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
 import { startNewAuth, startReauth, processCallback, savePairings } from './oauth.js';
@@ -178,6 +178,20 @@ export function createApp(): Express {
       }
       const { url } = await startReauth(connectionId);
       res.redirect(url);
+    })
+  );
+
+  app.post(
+    '/connections/:id/delete',
+    asyncHandler(async (req, res) => {
+      const connectionId = req.params.id;
+      if (!getConnection(connectionId)) {
+        res.status(404).send(messagePage('Unknown connection', connectionId, { error: true }));
+        return;
+      }
+      await deleteConnection(connectionId);
+      await removeAccountsForConnection(connectionId);
+      res.redirect('/?msg=' + encodeURIComponent('Connection deleted.'));
     })
   );
 

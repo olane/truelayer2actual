@@ -274,6 +274,7 @@ export function createApp(): Express {
       const name = asString(req.body?.name);
       const syncId = asString(req.body?.syncId);
       const pairingId = asString(req.body?.pairingId);
+      const encryptionPassword = asString(req.body?.encryptionPassword);
 
       if (!name || !syncId) {
         res
@@ -282,7 +283,7 @@ export function createApp(): Express {
         return;
       }
 
-      await addBudget({ id: generateBudgetId(), name, syncId });
+      await addBudget({ id: generateBudgetId(), name, syncId, encryptionPassword });
 
       if (pairingId) {
         res.redirect('/pair/' + encodeURIComponent(pairingId));

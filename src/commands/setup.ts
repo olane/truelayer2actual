@@ -143,7 +143,16 @@ async function collectBudgets(rl: readline.Interface): Promise<Budget[]> {
       logger.warn('Budget name and sync ID are both required.');
       continue;
     }
-    budgets.push({ id: generateBudgetId(), name, syncId });
+    const encryptionPassword = await prompt(
+      rl,
+      'Encryption password (blank if E2E encryption is off): '
+    );
+    budgets.push({
+      id: generateBudgetId(),
+      name,
+      syncId,
+      encryptionPassword: encryptionPassword || undefined,
+    });
   }
 
   return budgets;

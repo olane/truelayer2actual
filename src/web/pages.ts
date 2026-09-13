@@ -235,6 +235,7 @@ export function pairingPage(options: PairingPageOptions): string {
        <div class="row">
          <input type="text" name="name" placeholder="Budget name" required>
          <input type="text" name="syncId" placeholder="Sync ID" required>
+         <input type="password" name="encryptionPassword" placeholder="Encryption password (optional)">
          <button class="primary" type="submit">Add budget</button>
        </div>
      </form>

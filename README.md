@@ -105,14 +105,15 @@ This opens a browser for TrueLayer OAuth, then prompts you to map each bank acco
 ### Multiple budgets
 
 You can sync into more than one Actual budget (e.g. a personal and a joint budget on the
-same server). All budgets share `ACTUAL_SERVER_URL` and `ACTUAL_PASSWORD`; only the sync id
-differs per budget.
+same server). All budgets share `ACTUAL_SERVER_URL` and `ACTUAL_PASSWORD`; the sync id (and,
+optionally, an E2E encryption password) differs per budget.
 
-- **CLI setup** (`npm run setup`): you are prompted to add budgets (name + sync id), then for
-  each bank account/card you choose *which budget* before pairing *which account* — so a single
-  bank connection can span multiple budgets.
+- **CLI setup** (`npm run setup`): you are prompted to add budgets (name + sync id + optional
+  encryption password), then for each bank account/card you choose *which budget* before pairing
+  *which account* — so a single bank connection can span multiple budgets.
 - **Dashboard** (`npm run serve`): after authorising a bank, each account row has its own budget
-  selector next to the account selector. You can also add budgets directly from the pairing page.
+  selector next to the account selector. You can also add budgets directly from the pairing page
+  (including an optional encryption password).
 
 `ACTUAL_SYNC_ID` remains as a convenience: it defines the "Default" budget used when no other
 budgets have been configured yet (and for backwards compatibility with older configs).

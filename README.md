@@ -89,10 +89,15 @@ NTFY_URL=                 # optional: full ntfy topic URL
 HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
 ```
 
-> **Important:** `@actual-app/api` must match your Actual server version. If you get an `out-of-sync-migrations` error, run:
+> **Important:** `@actual-app/api` must match your Actual server version. It is pinned to a
+> concrete release in `package.json` (not `latest`) so `npm ci` stays reproducible. To upgrade
+> when you bump your Actual server, pin the new release and reinstall:
 > ```bash
 > npm install @actual-app/api@<your-server-version>
 > ```
+> See the [release notes](https://actualbudget.org/docs/releases/) for the current version and
+> Docker tag. If you get an `out-of-sync-migrations` error, the client and server versions are
+> mismatched — open Actual Budget in your browser to migrate, then match the API version.
 
 ### 3. Pair accounts
 

@@ -120,7 +120,7 @@ export async function saveConfig(config: Config): Promise<void> {
     throw new Error(`Cannot save invalid config: ${result.error.message}`);
   }
 
-  atomicWriteFile(CONFIG_PATH, JSON.stringify(result.data, null, 2) + '\n');
+  atomicWriteFile(CONFIG_PATH, JSON.stringify(result.data, null, 2) + '\n', { mode: 0o600 });
   logger.debug(`Saved config to ${CONFIG_PATH}`);
 }
 

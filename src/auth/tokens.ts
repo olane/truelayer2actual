@@ -5,6 +5,8 @@ import axios from 'axios';
 import { z } from 'zod';
 import { logger } from '../logger.js';
 import { atomicWriteFile } from '../util/fs.js';
+import { withStateLock } from '../util/lock.js';
+import { HTTP_TIMEOUT_MS } from '../util/http.js';
 
 const TokenSchema = z.object({
   accessToken: z.string(),
@@ -19,6 +21,7 @@ const TokenSchema = z.object({
   needsReauth: z.boolean().optional(),
   reauthReason: z.string().optional(),
   lastNotifiedAt: z.string().optional(),
+  lastNotifiedReason: z.string().optional(),
 });
 
 export type Tokens = z.infer<typeof TokenSchema>;
@@ -114,14 +117,19 @@ export function loadAllConnections(): Record<string, Tokens> {
 }
 
 /**
- * Merge a partial patch into an existing connection and persist it atomically.
- * Returns the updated token set.
+ * Merge a partial patch into an existing connection and persist it atomically,
+ * re-reading the current file inside the state lock so concurrent writers
+ * (e.g. an OAuth callback) are never clobbered.
  */
-export function updateConnection(connectionId: string, patch: Partial<Tokens>): Tokens {
+function applyConnectionPatch(connectionId: string, patch: Partial<Tokens>): Tokens {
   const current = loadConnection(connectionId);
   const updated: Tokens = { ...current, ...patch };
   saveConnection(connectionId, updated);
   return updated;
+}
+
+export function updateConnection(connectionId: string, patch: Partial<Tokens>): Promise<Tokens> {
+  return withStateLock(() => applyConnectionPatch(connectionId, patch));
 }
 
 /** Persist fresh connection metadata after a successful authenticated call. */
@@ -133,7 +141,7 @@ export function markConnectionHealthy(
     consentExpiresAt?: string;
     consentStatus?: string;
   }
-): Tokens {
+): Promise<Tokens> {
   const patch: Partial<Tokens> = {
     needsReauth: false,
     reauthReason: undefined,
@@ -146,7 +154,7 @@ export function markConnectionHealthy(
 }
 
 /** Flag a connection as needing a fresh user consent. */
-export function markConnectionNeedsReauth(connectionId: string, reason: string): Tokens {
+export function markConnectionNeedsReauth(connectionId: string, reason: string): Promise<Tokens> {
   return updateConnection(connectionId, { needsReauth: true, reauthReason: reason });
 }
 
@@ -165,7 +173,12 @@ export function removeStaleConnections(activeConnectionIds: Set<string>): void {
 
 export interface RefreshDeps {
   post?: typeof axios.post;
-  save?: (connectionId: string, tokens: Tokens) => void;
+  /**
+   * Persist only the fields owned by a refresh. Defaults to a locked
+   * read-merge-write so metadata written by a concurrent OAuth callback
+   * (`lastAuthAt`, consent, notifications) is preserved.
+   */
+  persist?: (connectionId: string, patch: Partial<Tokens>) => void | Promise<void>;
 }
 
 export async function refreshConnectionIfNeeded(
@@ -174,7 +187,7 @@ export async function refreshConnectionIfNeeded(
   deps: RefreshDeps = {}
 ): Promise<string> {
   const post = deps.post ?? axios.post;
-  const save = deps.save ?? saveConnection;
+  const persist = deps.persist ?? ((id, patch) => updateConnection(id, patch));
 
   const expiresAt = new Date(tokens.expiresAt).getTime();
   const BUFFER_MS = 60 * 1000;
@@ -202,6 +215,7 @@ export async function refreshConnectionIfNeeded(
     });
     const res = await post<typeof response>(tokenUrl(), params.toString(), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: HTTP_TIMEOUT_MS,
     });
     response = res.data;
   } catch (err) {
@@ -216,12 +230,10 @@ export async function refreshConnectionIfNeeded(
           `[${connectionId}] Refresh token is invalid or expired. ` +
             'Re-authenticate from the dashboard to reconnect this bank.'
         );
-        const flagged: Tokens = {
-          ...tokens,
+        await persist(connectionId, {
           needsReauth: true,
           reauthReason: 'refresh_token_invalid',
-        };
-        save(connectionId, flagged);
+        });
         throw new ReauthRequiredError(connectionId, 'Refresh token is invalid or expired');
       }
       // Everything else (network failure, 5xx, throttling) is retryable.
@@ -233,16 +245,15 @@ export async function refreshConnectionIfNeeded(
     throw err;
   }
 
-  const updated: Tokens = {
-    ...tokens,
-    accessToken: response.access_token,
+  const accessToken = response.access_token;
+  await persist(connectionId, {
+    accessToken,
     // TrueLayer may omit refresh_token on refresh — keep the existing one.
     refreshToken: response.refresh_token ?? tokens.refreshToken,
     expiresAt: new Date(Date.now() + response.expires_in * 1000).toISOString(),
     needsReauth: false,
     reauthReason: undefined,
-  };
-  save(connectionId, updated);
+  });
   logger.info(`[${connectionId}] Token refreshed successfully`);
-  return updated.accessToken;
+  return accessToken;
 }

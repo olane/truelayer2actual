@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { pathToFileURL } from 'url';
-import { loadConfig, saveConfig } from '../config.js';
+import { loadConfig, updateConfig } from '../config.js';
 import {
   loadConnection,
   refreshConnectionIfNeeded,
@@ -27,9 +27,12 @@ import {
 } from '../clients/actual.js';
 import { mapTransaction } from '../mapper.js';
 import { notifyConnection } from '../notify.js';
-import { withStateLock } from '../util/lock.js';
+import { createMutex } from '../util/lock.js';
 import { logger } from '../logger.js';
 import type { Account } from '../config.js';
+
+/** Prevents two full syncs from overlapping (token rotation, double import). */
+const withSyncLock = createMutex();
 
 // ---------------------------------------------------------------------------
 // Date helpers
@@ -172,7 +175,7 @@ async function refreshConnectionMetadata(
   } catch (err) {
     if (err instanceof ConsentExpiredError) {
       logger.warn(`[${connectionId}] TrueLayer consent has expired — re-auth required.`);
-      markConnectionNeedsReauth(connectionId, 'consent_expired');
+      await markConnectionNeedsReauth(connectionId, 'consent_expired');
       await notifyConnection(connectionId, 'consent_expired', {
         title: `Reconnect ${connectionLabel(connectionId)}`,
         message: 'TrueLayer consent has expired. Open the dashboard to reconnect.',
@@ -188,7 +191,7 @@ async function refreshConnectionMetadata(
     return;
   }
 
-  markConnectionHealthy(connectionId, {
+  await markConnectionHealthy(connectionId, {
     providerId: me.provider?.provider_id,
     providerDisplayName: me.provider?.display_name,
     consentExpiresAt: me.consent_expires_at,
@@ -224,7 +227,7 @@ export interface SyncSummary {
 }
 
 export async function runSync(): Promise<SyncSummary> {
-  return withStateLock(() => runSyncInternal());
+  return withSyncLock(() => runSyncInternal());
 }
 
 async function runSyncInternal(): Promise<SyncSummary> {
@@ -242,6 +245,11 @@ async function runSyncInternal(): Promise<SyncSummary> {
   const { accessTokens, skipped, errors } = await resolveConnectionTokens(connectionIds);
   summary.skipped.push(...skipped);
   summary.errors.push(...errors);
+
+  // Record sync timestamps by TrueLayer account id and persist them with a
+  // locked read-merge-write afterwards, so a concurrent reauth/pairing that
+  // changed connection ids isn't clobbered by a stale in-memory snapshot.
+  const lastSyncedAt = new Map<string, string>();
 
   await withActual(async () => {
     for (const account of config.accounts) {
@@ -277,7 +285,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
         }
 
         await validateBalance(accessToken, account);
-        account.lastSyncedAt = new Date().toISOString();
+        lastSyncedAt.set(account.truelayerAccountId, new Date().toISOString());
         summary.synced.push(account.name);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -291,7 +299,14 @@ async function runSyncInternal(): Promise<SyncSummary> {
     }
   });
 
-  await saveConfig(config);
+  if (lastSyncedAt.size > 0) {
+    await updateConfig((cfg) => {
+      for (const account of cfg.accounts) {
+        const ts = lastSyncedAt.get(account.truelayerAccountId);
+        if (ts) account.lastSyncedAt = ts;
+      }
+    });
+  }
 
   // Best-effort metadata refresh — never fail the run over this.
   for (const [connectionId, accessToken] of accessTokens) {

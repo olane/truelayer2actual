@@ -3,6 +3,7 @@ import path from 'path';
 import { z } from 'zod';
 import { logger } from './logger.js';
 import { atomicWriteFile } from './util/fs.js';
+import { withStateLock } from './util/lock.js';
 
 const AccountSchema = z.object({
   name: z.string(),
@@ -83,4 +84,63 @@ export function mergeAccounts(existing: Account[], incoming: Account[]): Account
     }
   }
   return merged;
+}
+
+/**
+ * Read-modify-write `config.json` under the state lock, re-reading the file
+ * inside the critical section. Use this for partial updates (e.g. recording
+ * `lastSyncedAt`) so a concurrent writer's changes are not clobbered.
+ */
+export function updateConfig(mutator: (config: Config) => void): Promise<Config> {
+  return withStateLock(async () => {
+    const config = await loadConfig();
+    mutator(config);
+    await saveConfig(config);
+    return config;
+  });
+}
+
+export interface ReconcileOptions {
+  /** The connection id the fetched accounts now belong to. */
+  newConnectionId: string;
+  /** The previous connection id whose accounts should be repointed. */
+  remapFrom?: string;
+  /** TrueLayer account ids returned by the latest consent. */
+  fetchedIds: Set<string>;
+}
+
+export interface ReconcileResult {
+  accounts: Account[];
+  changed: boolean;
+  /** Previously mapped accounts that the consent did not return. */
+  missing: Account[];
+}
+
+/**
+ * Repoint existing mappings at a (possibly new) connection id after re-auth,
+ * without touching pairings or `lastSyncedAt`. Pure helper so the risky part
+ * of the callback is unit-testable.
+ */
+export function reconcileConfigAccounts(
+  accounts: Account[],
+  options: ReconcileOptions
+): ReconcileResult {
+  const { newConnectionId, remapFrom, fetchedIds } = options;
+  const missing: Account[] = [];
+  let changed = false;
+
+  const next = accounts.map((account) => {
+    const wasOnRemap = remapFrom !== undefined && account.connectionId === remapFrom;
+    const isFetched = fetchedIds.has(account.truelayerAccountId);
+
+    if (wasOnRemap && !isFetched) missing.push(account);
+
+    if ((wasOnRemap || isFetched) && account.connectionId !== newConnectionId) {
+      changed = true;
+      return { ...account, connectionId: newConnectionId };
+    }
+    return account;
+  });
+
+  return { accounts: next, changed, missing };
 }

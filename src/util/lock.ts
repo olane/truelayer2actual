@@ -1,18 +1,24 @@
 /**
- * A tiny process-wide async mutex.
+ * Async mutexes used to serialise access to shared state.
  *
- * Serialises read-modify-write operations on shared state (`config.json`,
- * `tokens.json`) between the sync scheduler and web routes. Ordering rule: the
- * state lock is always acquired before the Actual API lock (`withActual`),
- * never the other way around, to avoid deadlock.
+ * Ordering rule: a full sync takes `syncLock` first, then briefly takes
+ * `stateLock` for read-modify-write sections, and `withActual` is never taken
+ * while holding `stateLock`. This keeps critical sections short and avoids
+ * deadlock.
  */
-let chain: Promise<unknown> = Promise.resolve();
+export type Mutex = <T>(fn: () => T | Promise<T>) => Promise<T>;
 
-export function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = chain.then(() => fn());
-  chain = run.then(
-    () => undefined,
-    () => undefined
-  );
-  return run;
+export function createMutex(): Mutex {
+  let chain: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => T | Promise<T>): Promise<T> => {
+    const run = chain.then(() => fn());
+    chain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  };
 }
+
+/** Protects `data/config.json` and `data/tokens.json` read-modify-write. */
+export const withStateLock = createMutex();

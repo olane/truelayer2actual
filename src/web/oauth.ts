@@ -3,6 +3,7 @@ import axios from 'axios';
 import {
   generateConnectionId,
   saveConnection,
+  getConnection,
   loadConnection,
   removeStaleConnections,
   type Tokens,
@@ -15,7 +16,13 @@ import {
   requireEnv,
 } from '../auth/oauth.js';
 import { generateReauthLink, getMe } from '../clients/truelayer.js';
-import { loadConfig, saveConfig, mergeAccounts, type Account } from '../config.js';
+import {
+  loadConfig,
+  saveConfig,
+  mergeAccounts,
+  reconcileConfigAccounts,
+  type Account,
+} from '../config.js';
 import { withStateLock } from '../util/lock.js';
 import { logger } from '../logger.js';
 
@@ -186,10 +193,14 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
   const remapFrom =
     pending.previousConnectionId ?? (pending.mode === 'reauth' ? pending.connectionId : undefined);
 
+  // Only retain the previous refresh token for a same-connection reauth, where
+  // the old token is still valid. In the grace-lapsed full-auth fallback the old
+  // token is dead, so a missing replacement should surface as an error rather
+  // than silently storing a token that immediately re-triggers reauth.
   let previousTokens: Tokens | undefined;
-  if (remapFrom) {
+  if (pending.mode === 'reauth' && pending.connectionId) {
     try {
-      previousTokens = loadConnection(remapFrom);
+      previousTokens = loadConnection(pending.connectionId);
     } catch {
       // Connection vanished — treat as a fresh auth.
     }
@@ -234,7 +245,6 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
     pending.mode === 'reauth' && pending.connectionId
       ? pending.connectionId
       : generateConnectionId();
-  saveConnection(connectionId, tokens);
 
   const items: PairingItem[] = [
     ...accounts.map((a) => ({
@@ -251,42 +261,47 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
     })),
   ];
 
-  let existingConfig: Awaited<ReturnType<typeof loadConfig>> | null = null;
-  try {
-    existingConfig = await loadConfig();
-  } catch {
-    existingConfig = null;
-  }
+  const fetchedIds = new Set(items.map((i) => i.truelayerAccountId));
 
-  if (existingConfig) {
-    const fetchedIds = new Set(items.map((i) => i.truelayerAccountId));
-    let changed = false;
+  // All shared-state mutation happens here, under the state lock, re-reading
+  // config inside the critical section. Network I/O is already done, so the
+  // lock is not held across the slow part.
+  const { unmapped } = await withStateLock(async () => {
+    const existingTokens = getConnection(connectionId);
+    saveConnection(connectionId, existingTokens ? { ...existingTokens, ...tokens } : tokens);
 
-    for (const account of existingConfig.accounts) {
-      const wasOnRemap = remapFrom !== undefined && account.connectionId === remapFrom;
-      const isFetched = fetchedIds.has(account.truelayerAccountId);
+    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+    try {
+      config = await loadConfig();
+    } catch {
+      config = null;
+    }
 
-      if (wasOnRemap && !isFetched) {
+    if (config) {
+      const result = reconcileConfigAccounts(config.accounts, {
+        newConnectionId: connectionId,
+        remapFrom,
+        fetchedIds,
+      });
+      for (const account of result.missing) {
         logger.warn(
           `Previously mapped account "${account.name}" was not returned by TrueLayer. ` +
             'Keeping the mapping.'
         );
       }
-      if ((wasOnRemap || isFetched) && account.connectionId !== connectionId) {
-        account.connectionId = connectionId;
-        changed = true;
+      if (result.changed) {
+        config.accounts = result.accounts;
+        await saveConfig(config);
       }
     }
 
-    if (changed) await saveConfig(existingConfig);
-  }
+    const mappedIds = new Set((config?.accounts ?? []).map((a) => a.truelayerAccountId));
+    const active = new Set((config?.accounts ?? []).map((a) => a.connectionId));
+    active.add(connectionId);
+    removeStaleConnections(active);
 
-  const mappedIds = new Set((existingConfig?.accounts ?? []).map((a) => a.truelayerAccountId));
-  const unmapped = items.filter((i) => !mappedIds.has(i.truelayerAccountId));
-
-  const activeConnectionIds = new Set((existingConfig?.accounts ?? []).map((a) => a.connectionId));
-  activeConnectionIds.add(connectionId);
-  removeStaleConnections(activeConnectionIds);
+    return { unmapped: items.filter((i) => !mappedIds.has(i.truelayerAccountId)) };
+  });
 
   if (unmapped.length === 0) {
     return { type: 'done', message: `${provider} is connected.` };

@@ -78,6 +78,13 @@ ACTUAL_ENCRYPTION_PASSWORD=         # optional — only if E2E encryption is ena
 SYNC_DAYS_LOOKBACK=7      # how many days back to fetch on first run
 SYNC_INTERVAL_HOURS=0     # 0 = one-shot (use external cron); >0 = built-in loop
 SETUP_PORT=3000
+
+# Dashboard / notifications (npm run serve)
+PORT=3000                 # falls back to SETUP_PORT, then 3000
+DASHBOARD_URL=https://truelayer.example.com
+REAUTH_WARN_DAYS=14       # warn/notify when consent expires within this many days
+NTFY_URL=                 # optional: full ntfy topic URL
+HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
 ```
 
 > **Important:** `@actual-app/api` must match your Actual server version. If you get an `out-of-sync-migrations` error, run:
@@ -103,10 +110,38 @@ On first run it fetches the last `SYNC_DAYS_LOOKBACK` days. Subsequent runs use 
 
 ## Docker
 
-### Build and run setup
+### Build and run (always-on, recommended)
 
 ```bash
 docker build -t truelayer2actual .
+docker run -d --restart unless-stopped \
+  -p 3000:3000 \
+  -v /path/to/data:/app/data \
+  --env-file .env \
+  truelayer2actual
+```
+
+Open the dashboard at `http://localhost:3000` (or your reverse-proxied host): add banks,
+pair accounts, trigger a sync, and reconnect banks from a browser — no TTY and no
+container restarts. The process runs the Express dashboard and the sync scheduler in a
+single Node process, so there is no race on `data/tokens.json`/`config.json`.
+
+When a bank's refresh token dies or its consent is about to expire, the connection is
+flagged `needsReauth` (visible at `/healthz` and on the dashboard), other banks keep
+syncing, and a notification is sent if `NTFY_URL`/`HA_WEBHOOK_URL` is configured.
+
+### One-off sync
+
+```bash
+docker run --rm \
+  -v /path/to/data:/app/data \
+  --env-file .env \
+  truelayer2actual node dist/commands/sync.js
+```
+
+### CLI setup (disaster recovery)
+
+```bash
 docker run --rm -it \
   -p 3000:3000 \
   -v /path/to/data:/app/data \
@@ -121,16 +156,17 @@ services:
   truelayer2actual:
     image: truelayer2actual:latest
     container_name: truelayer2actual
+    ports:
+      - "3000:3000"
     volumes:
       - /path/to/data:/app/data
     env_file: .env
-    restart: "no"  # triggered by cron, not always-on
-```
-
-Run a sync:
-
-```bash
-docker compose run --rm truelayer2actual
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
 ```
 
 ## Scheduling
@@ -180,9 +216,11 @@ TrueLayer provides a sandbox environment with a mock bank that returns predictab
 
 | Script | Description |
 |---|---|
-| `npm run setup` | One-time OAuth + account pairing |
+| `npm run serve` | Always-on dashboard + sync scheduler (recommended) |
+| `npm run setup` | One-time OAuth + account pairing (CLI) |
 | `npm run sync` | Sync transactions (one-shot or loop) |
 | `npm run build` | Compile TypeScript to `dist/` |
+| `npm run start:serve` | Run compiled serve |
 | `npm run start:setup` | Run compiled setup |
 | `npm run start:sync` | Run compiled sync |
 | `npm test` | Run unit tests |
@@ -192,19 +230,27 @@ TrueLayer provides a sandbox environment with a mock bank that returns predictab
 ```
 src/
 ├── commands/
-│   ├── setup.ts        # OAuth flow + interactive account pairing
-│   └── sync.ts         # Main sync entry point
+│   ├── serve.ts        # Express dashboard + sync scheduler (always-on)
+│   ├── setup.ts        # CLI OAuth flow + interactive account pairing
+│   └── sync.ts         # Sync core (runSync) + one-shot/loop entry point
+├── web/
+│   ├── server.ts       # Routes: dashboard, reauth, callback, pair, sync, healthz
+│   ├── oauth.ts        # Pending-state store, callback handling, pairing sessions
+│   └── pages.ts        # Server-rendered HTML (no frontend build step)
 ├── auth/
-│   ├── server.ts       # Temporary Express OAuth callback server
-│   └── tokens.ts       # Token storage, refresh, expiry check
+│   ├── server.ts       # Temporary Express OAuth callback server (CLI setup only)
+│   ├── oauth.ts        # Shared auth URL / code exchange / account fetch helpers
+│   └── tokens.ts       # Token storage, refresh, metadata, expiry check
 ├── clients/
-│   ├── truelayer.ts    # TrueLayer Data API (accounts, transactions, balance)
-│   └── actual.ts       # Actual Budget API wrapper
+│   ├── truelayer.ts    # TrueLayer Data API (accounts, transactions, balance, /me, reauthuri)
+│   └── actual.ts       # Actual Budget API wrapper + withActual() mutex
 ├── mapper.ts           # TrueLayer transaction → Actual transaction
+├── notify.ts           # ntfy / Home Assistant notifications with dedupe
 ├── config.ts           # config.json read/write with zod validation
+├── util/fs.ts          # Atomic file writes
 └── logger.ts           # Structured logging
 data/                   # Gitignored — mount as a volume to persist state
-├── tokens.json         # TrueLayer OAuth tokens
+├── tokens.json         # TrueLayer OAuth tokens + connection metadata
 ├── config.json         # Account mappings + sync state
 └── actual-cache/       # @actual-app/api local budget cache
 ```

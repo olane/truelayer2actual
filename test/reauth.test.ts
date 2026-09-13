@@ -33,64 +33,67 @@ describe('refreshConnectionIfNeeded', () => {
   });
 
   it('marks needsReauth and throws ReauthRequiredError instead of exiting', async () => {
-    let saved: Tokens | undefined;
+    let patch: Partial<Tokens> | undefined;
     const post = rejectingPost({ status: 401, data: { error: 'invalid_grant' } });
 
     await assert.rejects(
       () =>
         refreshConnectionIfNeeded('conn_test', expiredTokens(), {
           post,
-          save: (_id, tokens) => {
-            saved = tokens;
+          persist: (_id, p) => {
+            patch = p;
           },
         }),
       (err: unknown) => err instanceof ReauthRequiredError
     );
 
-    assert.equal(saved?.needsReauth, true);
-    assert.equal(saved?.reauthReason, 'refresh_token_invalid');
-    assert.equal(saved?.accessToken, 'old-access');
+    assert.equal(patch?.needsReauth, true);
+    assert.equal(patch?.reauthReason, 'refresh_token_invalid');
+    // Must not rewrite tokens/metadata it doesn't own.
+    assert.equal('accessToken' in (patch ?? {}), false);
   });
 
   it('does not flip needsReauth on a retryable 5xx', async () => {
-    let saved: Tokens | undefined;
+    let called = false;
     const post = rejectingPost({ status: 503, data: { error: 'server_error' } });
 
     await assert.rejects(
       () =>
         refreshConnectionIfNeeded('conn_test', expiredTokens(), {
           post,
-          save: (_id, tokens) => {
-            saved = tokens;
+          persist: () => {
+            called = true;
           },
         }),
       (err: unknown) => !(err instanceof ReauthRequiredError)
     );
 
-    assert.equal(saved, undefined);
+    assert.equal(called, false);
   });
 
-  it('persists refreshed tokens and preserves metadata', async () => {
-    let saved: Tokens | undefined;
+  it('persists only the refreshed fields, leaving metadata untouched', async () => {
+    let patch: Partial<Tokens> | undefined;
     const post = (async () => ({
       data: { access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 },
     })) as unknown as RefreshDeps['post'];
 
     const accessToken = await refreshConnectionIfNeeded(
       'conn_test',
-      expiredTokens({ providerDisplayName: 'Monzo' }),
+      expiredTokens({ providerDisplayName: 'Monzo', consentExpiresAt: '2026-12-01T00:00:00.000Z' }),
       {
         post,
-        save: (_id, tokens) => {
-          saved = tokens;
+        persist: (_id, p) => {
+          patch = p;
         },
       }
     );
 
     assert.equal(accessToken, 'new-access');
-    assert.equal(saved?.refreshToken, 'new-refresh');
-    assert.equal(saved?.providerDisplayName, 'Monzo');
-    assert.equal(saved?.needsReauth, false);
+    assert.equal(patch?.refreshToken, 'new-refresh');
+    assert.equal(patch?.needsReauth, false);
+    // Provider/consent metadata is owned by the callback, not the refresh.
+    assert.equal('providerDisplayName' in (patch ?? {}), false);
+    assert.equal('consentExpiresAt' in (patch ?? {}), false);
   });
 });
 

@@ -99,15 +99,24 @@ export function createApp(): Express {
   app.get(
     '/healthz',
     asyncHandler(async (_req, res) => {
-      const connections = loadAllConnections();
-      const view = Object.entries(connections).map(([id, tokens]) => ({
-        id,
-        provider: tokens.providerDisplayName ?? tokens.providerId ?? null,
-        needsReauth: Boolean(tokens.needsReauth),
-        consentExpiresAt: tokens.consentExpiresAt ?? null,
-      }));
-      const degraded = view.some((c) => c.needsReauth);
-      res.status(200).json({ status: degraded ? 'degraded' : 'ok', connections: view });
+      try {
+        const connections = loadAllConnections();
+        const view = Object.entries(connections).map(([id, tokens]) => ({
+          id,
+          provider: tokens.providerDisplayName ?? tokens.providerId ?? null,
+          needsReauth: Boolean(tokens.needsReauth),
+          consentExpiresAt: tokens.consentExpiresAt ?? null,
+        }));
+        const degraded = view.some((c) => c.needsReauth);
+        res.status(200).json({ status: degraded ? 'degraded' : 'ok', connections: view });
+      } catch (err) {
+        // Never let a corrupt/unreadable tokens.json make the container unhealthy.
+        res.status(200).json({
+          status: 'degraded',
+          connections: [],
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     })
   );
 

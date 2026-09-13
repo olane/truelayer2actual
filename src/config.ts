@@ -62,22 +62,62 @@ export function generateBudgetId(): string {
  * Normalise a parsed config so legacy files keep working: seed a "default"
  * budget from env vars when none are defined, and make sure any account that
  * still references the default budget id has a matching budget to point at.
+ *
+ * The Actual sync id identifies a budget, so two entries with the same sync id
+ * are collapsed to one. Without this the pairing page lists a single Actual
+ * budget twice and every account appears under both names.
  */
-function normalizeBudgets(data: Config): Config {
+export function normalizeBudgets(data: Config): Config {
   let budgets = data.budgets;
+  let accounts = data.accounts;
 
   if (budgets.length === 0) {
     const envBudget = budgetFromEnv();
     if (envBudget) budgets = [envBudget];
   }
 
-  const referencesDefault = data.accounts.some((a) => a.budgetId === DEFAULT_BUDGET_ID);
+  const referencesDefault = accounts.some((a) => a.budgetId === DEFAULT_BUDGET_ID);
   if (referencesDefault && !budgets.some((b) => b.id === DEFAULT_BUDGET_ID)) {
     const envBudget = budgetFromEnv();
-    if (envBudget) budgets = [envBudget, ...budgets];
+    if (envBudget) {
+      // A configured budget may already point at the same Actual budget as
+      // ACTUAL_SYNC_ID. Reuse it instead of seeding a second "Default" entry,
+      // and repoint any legacy default-budget accounts at it.
+      const existing = budgets.find((b) => b.syncId === envBudget.syncId);
+      if (existing) {
+        accounts = accounts.map((a) =>
+          a.budgetId === DEFAULT_BUDGET_ID ? { ...a, budgetId: existing.id } : a
+        );
+      } else {
+        budgets = [envBudget, ...budgets];
+      }
+    }
   }
 
-  return budgets === data.budgets ? data : { ...data, budgets };
+  // Collapse any remaining budgets that resolve to the same Actual budget,
+  // keeping the most recently configured entry and repointing accounts that
+  // referenced a dropped one.
+  const keptBySyncId = new Map<string, Budget>();
+  const droppedSyncIdById = new Map<string, string>();
+  for (const budget of budgets) {
+    if (keptBySyncId.has(budget.syncId)) {
+      const previous = keptBySyncId.get(budget.syncId);
+      if (previous) droppedSyncIdById.set(previous.id, budget.syncId);
+    }
+    keptBySyncId.set(budget.syncId, budget);
+  }
+
+  if (droppedSyncIdById.size > 0) {
+    budgets = [...keptBySyncId.values()];
+    accounts = accounts.map((account) => {
+      const syncId = droppedSyncIdById.get(account.budgetId);
+      const survivor = syncId ? keptBySyncId.get(syncId) : undefined;
+      return survivor ? { ...account, budgetId: survivor.id } : account;
+    });
+  }
+
+  if (budgets === data.budgets && accounts === data.accounts) return data;
+  return { ...data, budgets, accounts };
 }
 
 export async function loadConfig(): Promise<Config> {
@@ -207,9 +247,25 @@ export async function addBudget(budget: Budget): Promise<Budget[]> {
       config = { budgets: [], accounts: [], createdAt: new Date().toISOString() };
     }
 
-    const idx = config.budgets.findIndex((b) => b.id === budget.id);
-    if (idx === -1) config.budgets.push(budget);
-    else config.budgets[idx] = budget;
+    const byId = config.budgets.findIndex((b) => b.id === budget.id);
+    if (byId !== -1) {
+      config.budgets[byId] = budget;
+    } else {
+      const bySyncId = config.budgets.findIndex((b) => b.syncId === budget.syncId);
+      if (bySyncId === -1) {
+        config.budgets.push(budget);
+      } else {
+        // The sync id identifies the Actual budget, so adding one that is
+        // already configured renames it instead of creating a second entry
+        // that resolves to the same accounts. Keep the existing id so account
+        // references stay valid.
+        config.budgets[bySyncId] = {
+          ...config.budgets[bySyncId],
+          name: budget.name,
+          encryptionPassword: budget.encryptionPassword,
+        };
+      }
+    }
 
     await saveConfig(config);
     return config.budgets;

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   mergeAccounts,
   reconcileConfigAccounts,
+  applyPairingChanges,
   findBudgetBySyncId,
   duplicateSyncIdGroups,
   DuplicateSyncIdError,
@@ -103,6 +104,87 @@ describe('reconcileConfigAccounts', () => {
     assert.equal(result.changed, false);
     assert.equal(result.accounts[0].connectionId, 'other');
     assert.deepEqual(result.missing, []);
+  });
+});
+
+describe('applyPairingChanges', () => {
+  it('re-points a mapping at a new account and budget', () => {
+    const accounts = [account({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'old' })];
+
+    const result = applyPairingChanges(accounts, 'conn', {
+      'tl-1': { budgetId: 'budget_1', actualAccountId: 'new' },
+    });
+
+    assert.equal(result.changed, 1);
+    assert.equal(result.removed, 0);
+    assert.equal(result.accounts[0].budgetId, 'budget_1');
+    assert.equal(result.accounts[0].actualAccountId, 'new');
+  });
+
+  it('removes a mapping when the account id is blank', () => {
+    const accounts = [
+      account({ connectionId: 'conn', truelayerAccountId: 'tl-1' }),
+      account({ connectionId: 'conn', truelayerAccountId: 'tl-2' }),
+    ];
+
+    const result = applyPairingChanges(accounts, 'conn', {
+      'tl-1': { budgetId: 'default', actualAccountId: '' },
+    });
+
+    assert.equal(result.removed, 1);
+    assert.equal(result.changed, 0);
+    assert.deepEqual(
+      result.accounts.map((a) => a.truelayerAccountId),
+      ['tl-2']
+    );
+  });
+
+  it('leaves another connection untouched even when it shares an account id', () => {
+    const accounts = [
+      account({ connectionId: 'conn', truelayerAccountId: 'tl-1', actualAccountId: 'old' }),
+      account({ connectionId: 'other', truelayerAccountId: 'tl-1', actualAccountId: 'other-old' }),
+    ];
+
+    const result = applyPairingChanges(accounts, 'conn', {
+      'tl-1': { budgetId: 'default', actualAccountId: 'new' },
+    });
+
+    assert.equal(result.changed, 1);
+    assert.equal(result.accounts[1].actualAccountId, 'other-old');
+  });
+
+  it('does not count an unchanged selection as a change', () => {
+    const accounts = [account({ connectionId: 'conn', budgetId: 'default', actualAccountId: 'same' })];
+
+    const result = applyPairingChanges(accounts, 'conn', {
+      'tl-1': { budgetId: 'default', actualAccountId: 'same' },
+    });
+
+    assert.equal(result.changed, 0);
+    assert.equal(result.removed, 0);
+    assert.equal(result.accounts[0].actualAccountId, 'same');
+  });
+
+  it('preserves fields like lastSyncedAt when re-pointing', () => {
+    const accounts = [
+      account({ connectionId: 'conn', lastSyncedAt: '2026-01-01T00:00:00.000Z' }),
+    ];
+
+    const result = applyPairingChanges(accounts, 'conn', {
+      'tl-1': { budgetId: 'budget_1', actualAccountId: 'new' },
+    });
+
+    assert.equal(result.accounts[0].lastSyncedAt, '2026-01-01T00:00:00.000Z');
+  });
+
+  it('ignores mappings not present in the changes map', () => {
+    const accounts = [account({ connectionId: 'conn', actualAccountId: 'keep' })];
+
+    const result = applyPairingChanges(accounts, 'conn', {});
+
+    assert.equal(result.changed, 0);
+    assert.equal(result.accounts.length, 1);
+    assert.equal(result.accounts[0].actualAccountId, 'keep');
   });
 });
 

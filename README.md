@@ -145,7 +145,9 @@ docker run -d --restart unless-stopped \
 
 Open the dashboard at `http://localhost:3000` (or your reverse-proxied host): add banks,
 pair accounts, trigger a sync, and reconnect banks from a browser — no TTY and no
-container restarts. The process runs the Express dashboard and the sync scheduler in a
+container restarts. Existing pairings can be viewed and changed at any time via
+**Edit pairings** on a connection, without reconnecting the bank. The process runs the
+Express dashboard and the sync scheduler in a
 single Node process, so there is no race on `data/tokens.json`/`config.json`.
 
 When a bank's refresh token dies or its consent is about to expire, the connection is
@@ -256,7 +258,7 @@ src/
 │   ├── setup.ts        # CLI OAuth flow + interactive account pairing
 │   └── sync.ts         # Sync core (runSync) + one-shot/loop entry point
 ├── web/
-│   ├── server.ts       # Routes: dashboard, reauth, callback, pair, sync, healthz
+│   ├── server.ts       # Routes: dashboard, reauth, callback, pair, edit pairings, sync, healthz
 │   ├── oauth.ts        # Pending-state store, callback handling, pairing sessions
 │   └── pages.ts        # Server-rendered HTML (no frontend build step)
 ├── auth/

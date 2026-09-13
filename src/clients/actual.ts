@@ -16,16 +16,35 @@ const CACHE_DIR = path.join(process.cwd(), 'data', 'actual-cache');
 
 let actualReady = false;
 let actualQueue: Promise<unknown> = Promise.resolve();
+let lastActualError: string | null = null;
+
+export class ActualCompatibilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ActualCompatibilityError';
+  }
+}
 
 export function isActualReady(): boolean {
   return actualReady;
 }
 
+/** Last error from initialising Actual, surfaced via /healthz. */
+export function getActualError(): string | null {
+  return lastActualError;
+}
+
 /** Initialise the Actual connection once; safe to call repeatedly. */
 export async function ensureActual(): Promise<void> {
   if (actualReady) return;
-  await initActual();
-  actualReady = true;
+  try {
+    await initActual();
+    actualReady = true;
+    lastActualError = null;
+  } catch (err) {
+    lastActualError = err instanceof Error ? err.message : String(err);
+    throw err;
+  }
 }
 
 /**
@@ -119,11 +138,10 @@ export async function initActual(): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes('out-of-sync-migrations') || message.includes('migration')) {
-      logger.error(
+      throw new ActualCompatibilityError(
         'Actual Budget schema is out of sync. ' +
-          'Please open Actual Budget in your browser, let it migrate, then retry.'
+          'Open Actual Budget in your browser, let it migrate, then retry.'
       );
-      process.exit(1);
     }
     throw new Error(`Failed to download Actual Budget budget: ${message}`);
   }

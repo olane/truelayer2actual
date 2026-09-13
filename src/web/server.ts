@@ -7,7 +7,7 @@ import express, {
 } from 'express';
 import { loadAllConnections, getConnection } from '../auth/tokens.js';
 import { loadConfig } from '../config.js';
-import { withActual, getActualAccounts } from '../clients/actual.js';
+import { withActual, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
 import { startNewAuth, startReauth, processCallback, savePairings } from './oauth.js';
 import {
@@ -107,8 +107,13 @@ export function createApp(): Express {
           needsReauth: Boolean(tokens.needsReauth),
           consentExpiresAt: tokens.consentExpiresAt ?? null,
         }));
-        const degraded = view.some((c) => c.needsReauth);
-        res.status(200).json({ status: degraded ? 'degraded' : 'ok', connections: view });
+        const actualError = getActualError();
+        const degraded = view.some((c) => c.needsReauth) || Boolean(actualError);
+        res.status(200).json({
+          status: degraded ? 'degraded' : 'ok',
+          connections: view,
+          ...(actualError ? { error: actualError } : {}),
+        });
       } catch (err) {
         // Never let a corrupt/unreadable tokens.json make the container unhealthy.
         res.status(200).json({
@@ -196,11 +201,17 @@ export function createApp(): Express {
   app.post(
     '/sync',
     asyncHandler(async (_req, res) => {
-      const summary = await runSync();
-      const message =
-        `Sync finished: ${summary.synced.length} synced, ` +
-        `${summary.skipped.length} need re-auth, ${summary.errors.length} error(s).`;
-      res.redirect('/?msg=' + encodeURIComponent(message));
+      try {
+        const summary = await runSync();
+        const message =
+          `Sync finished: ${summary.synced.length} synced, ` +
+          `${summary.skipped.length} need re-auth, ${summary.errors.length} error(s).`;
+        res.redirect('/?msg=' + encodeURIComponent(message));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error('Manual sync failed:', message);
+        res.redirect('/?err=' + encodeURIComponent(message));
+      }
     })
   );
 

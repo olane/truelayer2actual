@@ -5,16 +5,23 @@ import express, {
   type Request,
   type Response,
 } from 'express';
-import { loadAllConnections, getConnection, deleteConnection } from '../auth/tokens.js';
+import { loadAllConnections, getConnection, deleteConnection, refreshConnectionIfNeeded } from '../auth/tokens.js';
 import {
   loadConfig,
+  updateConfig,
+  mergeAccounts,
   removeAccountsForConnection,
   listBudgets,
   addBudget,
   generateBudgetId,
   duplicateSyncIdGroups,
+  applyPairingChanges,
   DuplicateSyncIdError,
+  type Account,
+  type Budget,
+  type PairingChange,
 } from '../config.js';
+import { fetchTrueLayerAccounts } from '../auth/oauth.js';
 import { withBudget, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
 import {
@@ -23,15 +30,19 @@ import {
   processCallback,
   savePairings,
   getPairingSession,
+  toPairingItems,
+  type PairingItem,
   type PairingSelection,
 } from './oauth.js';
 import {
   dashboardPage,
   pairingPage,
+  editPairingsPage,
   messagePage,
   type BudgetAccounts,
   type ConnectionStatus,
   type ConnectionView,
+  type PairingRow,
 } from './pages.js';
 import { logger } from '../logger.js';
 
@@ -115,6 +126,86 @@ function bannerFromQuery(req: Request): { message?: string; error?: string } {
     message: asString(req.query.msg),
     error: asString(req.query.err),
   };
+}
+
+/**
+ * Load the Actual accounts for each budget, skipping any budget that fails so a
+ * single unreachable budget does not blank the whole pairing page.
+ */
+async function loadBudgetAccounts(budgets: Budget[]): Promise<BudgetAccounts[]> {
+  const budgetAccounts: BudgetAccounts[] = [];
+  for (const budget of budgets) {
+    try {
+      const accounts = await withBudget(budget, () => getActualAccounts());
+      budgetAccounts.push({ budget, accounts });
+    } catch (err) {
+      logger.warn(
+        `Could not load accounts for budget "${budget.name}":`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+  return budgetAccounts;
+}
+
+/**
+ * Merge the accounts TrueLayer currently reports for a connection with any
+ * saved mappings, so the editor can both change and (un)assign accounts. A
+ * missing/expired consent or an unreachable API degrades to saved-only rows
+ * with an explanatory note instead of an error page.
+ */
+async function loadPairingRows(
+  connectionId: string,
+  savedAccounts: Account[]
+): Promise<{ rows: PairingRow[]; note?: string }> {
+  const savedByTlId = new Map(savedAccounts.map((a) => [a.truelayerAccountId, a]));
+  const connection = getConnection(connectionId);
+  let items: PairingItem[] = [];
+  let note: string | undefined;
+
+  if (!connection) {
+    note = 'Connection tokens are missing; showing saved pairings only.';
+  } else if (connection.needsReauth) {
+    note =
+      'This connection needs reconnecting. Showing saved pairings only; reconnect to add or refresh accounts.';
+  } else {
+    try {
+      const accessToken = await refreshConnectionIfNeeded(connectionId, connection);
+      const { accounts, cards } = await fetchTrueLayerAccounts(accessToken);
+      items = toPairingItems({ accounts, cards });
+    } catch (err) {
+      note = `Could not load accounts from TrueLayer (${
+        err instanceof Error ? err.message : String(err)
+      }). Showing saved pairings only.`;
+    }
+  }
+
+  const rows: PairingRow[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    seen.add(item.truelayerAccountId);
+    const saved = savedByTlId.get(item.truelayerAccountId);
+    rows.push({
+      ...item,
+      mapped: Boolean(saved),
+      budgetId: saved?.budgetId,
+      actualAccountId: saved?.actualAccountId,
+    });
+  }
+  for (const saved of savedAccounts) {
+    if (seen.has(saved.truelayerAccountId)) continue;
+    rows.push({
+      truelayerAccountId: saved.truelayerAccountId,
+      name: saved.name,
+      accountKind: saved.accountKind,
+      currency: saved.currency,
+      mapped: true,
+      budgetId: saved.budgetId,
+      actualAccountId: saved.actualAccountId,
+    });
+  }
+
+  return { rows, note };
 }
 
 /**
@@ -265,18 +356,7 @@ export function createApp(): Express {
       }
 
       const budgets = await listBudgets();
-      const budgetAccounts: BudgetAccounts[] = [];
-      for (const budget of budgets) {
-        try {
-          const accounts = await withBudget(budget, () => getActualAccounts());
-          budgetAccounts.push({ budget, accounts });
-        } catch (err) {
-          logger.warn(
-            `Could not load accounts for budget "${budget.name}":`,
-            err instanceof Error ? err.message : String(err)
-          );
-        }
-      }
+      const budgetAccounts = await loadBudgetAccounts(budgets);
 
       res.send(
         pairingPage({
@@ -293,6 +373,126 @@ export function createApp(): Express {
               ? 'Reconnected. Confirm any new accounts below.'
               : undefined,
         })
+      );
+    })
+  );
+
+  app.get(
+    '/connections/:id/pairings',
+    asyncHandler(async (req, res) => {
+      const connectionId = req.params.id;
+      const connection = getConnection(connectionId);
+      if (!connection) {
+        res.status(404).send(messagePage('Unknown connection', connectionId, { error: true }));
+        return;
+      }
+
+      let accounts: Account[] = [];
+      try {
+        accounts = (await loadConfig()).accounts.filter((a) => a.connectionId === connectionId);
+      } catch {
+        accounts = [];
+      }
+
+      const budgets = await listBudgets();
+      const [budgetAccounts, pairing] = await Promise.all([
+        loadBudgetAccounts(budgets),
+        loadPairingRows(connectionId, accounts),
+      ]);
+
+      res.send(
+        editPairingsPage({
+          connectionId,
+          provider: connection.providerDisplayName ?? connection.providerId ?? connectionId,
+          rows: pairing.rows,
+          budgetAccounts,
+          note: pairing.note,
+          message: asString(req.query.msg),
+          warning:
+            [duplicateSyncIdWarning(budgets), asString(req.query.err)]
+              .filter((w): w is string => Boolean(w))
+              .join(' ') || undefined,
+        })
+      );
+    })
+  );
+
+  app.post(
+    '/connections/:id/pairings',
+    asyncHandler(async (req, res) => {
+      const connectionId = req.params.id;
+      if (!getConnection(connectionId)) {
+        res.status(404).send(messagePage('Unknown connection', connectionId, { error: true }));
+        return;
+      }
+
+      let changed = 0;
+      let removed = 0;
+      try {
+        await updateConfig((config) => {
+          const existingByTlId = new Map(
+            config.accounts
+              .filter((a) => a.connectionId === connectionId)
+              .map((a) => [a.truelayerAccountId, a])
+          );
+          const changes: Record<string, PairingChange> = {};
+          const added: Account[] = [];
+
+          for (const key of Object.keys(req.body ?? {})) {
+            if (!key.startsWith('map_')) continue;
+            const truelayerAccountId = key.slice('map_'.length);
+            const actualAccountId = asString(req.body[key]) ?? '';
+            const existing = existingByTlId.get(truelayerAccountId);
+
+            if (!actualAccountId) {
+              // Blank means "do not sync": drop an existing mapping, ignore a new row.
+              if (existing) {
+                changes[truelayerAccountId] = {
+                  budgetId: existing.budgetId,
+                  actualAccountId: '',
+                };
+              }
+              continue;
+            }
+
+            const budgetId = asString(req.body[`budget_${truelayerAccountId}`]);
+            if (!budgetId) continue;
+
+            if (existing) {
+              changes[truelayerAccountId] = { budgetId, actualAccountId };
+            } else {
+              added.push({
+                name: asString(req.body[`name_${truelayerAccountId}`]) ?? truelayerAccountId,
+                connectionId,
+                budgetId,
+                accountKind:
+                  req.body[`kind_${truelayerAccountId}`] === 'card' ? 'card' : 'account',
+                truelayerAccountId,
+                actualAccountId,
+                currency: asString(req.body[`currency_${truelayerAccountId}`]) ?? 'GBP',
+              });
+            }
+          }
+
+          const result = applyPairingChanges(config.accounts, connectionId, changes);
+          config.accounts = mergeAccounts(result.accounts, added);
+          changed = result.changed + added.length;
+          removed = result.removed;
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error('Failed to update pairings:', message);
+        res.redirect('/?err=' + encodeURIComponent(message));
+        return;
+      }
+
+      const parts = [`Updated ${changed} pairing(s)`];
+      if (removed > 0) parts.push(`removed ${removed}`);
+      res.redirect(
+        '/connections/' +
+          encodeURIComponent(connectionId) +
+          '/pairings?msg=' +
+          encodeURIComponent(parts.join(', ') + '.')
       );
     })
   );

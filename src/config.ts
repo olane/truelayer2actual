@@ -182,6 +182,65 @@ export function mergeAccounts(existing: Account[], incoming: Account[]): Account
   return merged;
 }
 
+/** A new target for an existing mapping. An empty `actualAccountId` removes it. */
+export interface PairingChange {
+  budgetId: string;
+  actualAccountId: string;
+}
+
+export interface ApplyPairingChangesResult {
+  accounts: Account[];
+  changed: number;
+  removed: number;
+}
+
+/**
+ * Re-point existing mappings at a different budget/Actual account, or drop a
+ * mapping when `actualAccountId` is empty. Only accounts on `connectionId` are
+ * considered, so the dashboard cannot touch another bank's pairings. Pure
+ * helper so the edit route is unit-testable.
+ */
+export function applyPairingChanges(
+  accounts: Account[],
+  connectionId: string,
+  changes: Record<string, PairingChange>
+): ApplyPairingChangesResult {
+  let changed = 0;
+  let removed = 0;
+  const next: Account[] = [];
+
+  for (const account of accounts) {
+    if (account.connectionId !== connectionId) {
+      next.push(account);
+      continue;
+    }
+
+    const change = changes[account.truelayerAccountId];
+    if (!change) {
+      next.push(account);
+      continue;
+    }
+
+    if (change.actualAccountId.trim() === '') {
+      removed++;
+      continue;
+    }
+
+    if (account.actualAccountId !== change.actualAccountId || account.budgetId !== change.budgetId) {
+      changed++;
+      next.push({
+        ...account,
+        budgetId: change.budgetId,
+        actualAccountId: change.actualAccountId,
+      });
+    } else {
+      next.push(account);
+    }
+  }
+
+  return { accounts: next, changed, removed };
+}
+
 /**
  * Read-modify-write `config.json` under the state lock, re-reading the file
  * inside the critical section. Use this for partial updates (e.g. recording

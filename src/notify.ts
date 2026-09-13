@@ -1,5 +1,7 @@
 import axios from 'axios';
-import { getConnection, updateConnection } from './auth/tokens.js';
+import { getConnection, saveConnection, type Tokens } from './auth/tokens.js';
+import { withStateLock } from './util/lock.js';
+import { HTTP_TIMEOUT_MS } from './util/http.js';
 import { logger } from './logger.js';
 
 export interface NotifyOptions {
@@ -26,6 +28,7 @@ export async function notify(options: NotifyOptions): Promise<void> {
     tasks.push(
       axios.post(ntfyUrl, body.toString(), {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: HTTP_TIMEOUT_MS,
       })
     );
   }
@@ -33,11 +36,15 @@ export async function notify(options: NotifyOptions): Promise<void> {
   const haWebhookUrl = process.env.HA_WEBHOOK_URL;
   if (haWebhookUrl) {
     tasks.push(
-      axios.post(haWebhookUrl, {
-        title: options.title,
-        message: options.message,
-        url: options.url,
-      })
+      axios.post(
+        haWebhookUrl,
+        {
+          title: options.title,
+          message: options.message,
+          url: options.url,
+        },
+        { timeout: HTTP_TIMEOUT_MS }
+      )
     );
   }
 
@@ -54,8 +61,12 @@ export async function notify(options: NotifyOptions): Promise<void> {
 }
 
 /**
- * Send a notification for a connection at most once per 24h, recording the time
- * in tokens.json so restarts don't cause a notification storm.
+ * Send a notification for a connection at most once per 24h *per reason*,
+ * recording the time/reason in tokens.json so restarts don't cause a
+ * notification storm and a more urgent reason isn't suppressed by a milder one.
+ *
+ * The dedupe marker is written under the state lock; delivery is
+ * fire-and-forget so a slow endpoint can never block sync.
  */
 export async function notifyConnection(
   connectionId: string,
@@ -63,27 +74,32 @@ export async function notifyConnection(
   options: NotifyOptions
 ): Promise<void> {
   try {
-    let connection;
-    try {
-      connection = getConnection(connectionId);
-    } catch (err) {
-      logger.debug(
-        `[${connectionId}] Could not read connection for notification dedupe:`,
-        err instanceof Error ? err.message : String(err)
-      );
-      return;
-    }
+    let shouldSend = false;
+    await withStateLock(async () => {
+      const current = getConnection(connectionId);
+      if (!current) return;
+      const last = current.lastNotifiedAt ? Date.parse(current.lastNotifiedAt) : NaN;
+      const sameReason = current.lastNotifiedReason === reason;
+      if (Number.isFinite(last) && Date.now() - last < DEDUPE_WINDOW_MS && sameReason) {
+        logger.debug(`[${connectionId}] Suppressing duplicate ${reason} notification`);
+        return;
+      }
+      const marked: Tokens = {
+        ...current,
+        lastNotifiedAt: new Date().toISOString(),
+        lastNotifiedReason: reason,
+      };
+      saveConnection(connectionId, marked);
+      shouldSend = true;
+    });
 
-    const last = connection?.lastNotifiedAt ? Date.parse(connection.lastNotifiedAt) : NaN;
-    if (Number.isFinite(last) && Date.now() - last < DEDUPE_WINDOW_MS) {
-      logger.debug(`[${connectionId}] Suppressing duplicate ${reason} notification`);
-      return;
-    }
-
-    await notify(options);
-
-    if (connection) {
-      updateConnection(connectionId, { lastNotifiedAt: new Date().toISOString() });
+    if (shouldSend) {
+      void notify(options).catch((err) => {
+        logger.warn(
+          `[${connectionId}] Notification failed:`,
+          err instanceof Error ? err.message : String(err)
+        );
+      });
     }
   } catch (err) {
     logger.warn(

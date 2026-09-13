@@ -7,6 +7,7 @@ import {
   type TrueLayerCard,
 } from '../clients/truelayer.js';
 import type { Tokens } from './tokens.js';
+import { HTTP_TIMEOUT_MS } from '../util/http.js';
 
 export function requireEnv(name: string): string {
   const value = process.env[name];
@@ -75,6 +76,7 @@ export async function exchangeCodeForTokens(options: ExchangeOptions): Promise<T
     });
     const res = await axios.post<typeof data>(tokenUrl(sandbox), params.toString(), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: HTTP_TIMEOUT_MS,
     });
     data = res.data;
   } catch (err) {

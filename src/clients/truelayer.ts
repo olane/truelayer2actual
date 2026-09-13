@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import { logger } from '../logger.js';
+import { HTTP_TIMEOUT_MS } from '../util/http.js';
 
 export interface TrueLayerAccount {
   account_id: string;
@@ -77,8 +78,11 @@ function baseUrl(): string {
   return apiBaseUrl();
 }
 
-function authHeaders(accessToken: string): Record<string, string> {
-  return { Authorization: `Bearer ${accessToken}` };
+function authConfig(accessToken: string): { headers: Record<string, string>; timeout: number } {
+  return {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    timeout: HTTP_TIMEOUT_MS,
+  };
 }
 
 function handleAxiosError(err: unknown, context: string): never {
@@ -88,8 +92,8 @@ function handleAxiosError(err: unknown, context: string): never {
     const body = axiosErr.response?.data;
     if (status === 401) {
       throw new Error(
-        `${context}: Unauthorized (401). Your access token may be expired. ` +
-          'Try running "npm run sync" again or re-authenticate with "npm run setup".'
+        `${context}: Unauthorized (401). The access token may be expired. ` +
+          'Open the dashboard and reconnect this bank.'
       );
     }
     if (status === 403) {
@@ -114,7 +118,7 @@ export async function fetchAccounts(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerAccount>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     logger.debug(`Fetched ${res.data.results.length} account(s)`);
     return res.data.results;
@@ -135,7 +139,7 @@ export async function fetchCards(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerCard>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     logger.debug(`Fetched ${res.data.results.length} card(s)`);
     return res.data.results;
@@ -159,7 +163,7 @@ export async function fetchTransactions(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerTransaction>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
       params: { from, to },
     });
     logger.debug(
@@ -185,7 +189,7 @@ export async function fetchCardTransactions(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerTransaction>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
       params: { from, to },
     });
     logger.debug(`Fetched ${res.data.results.length} card transaction(s) for ${cardId}`);
@@ -204,7 +208,7 @@ export async function fetchCardBalance(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerBalance>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     const balance = res.data.results[0];
     if (!balance) throw new Error(`No balance data returned for card ${cardId}`);
@@ -223,7 +227,7 @@ export async function fetchBalance(
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerBalance>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     const balance = res.data.results[0];
     if (!balance) {
@@ -248,7 +252,7 @@ export async function getMe(accessToken: string): Promise<TrueLayerMe> {
 
   try {
     const res = await axios.get<TrueLayerResponse<TrueLayerMe>>(url, {
-      headers: authHeaders(accessToken),
+      ...authConfig(accessToken),
     });
     const me = res.data.results[0];
     if (!me) throw new Error('No metadata returned by /data/v1/me');
@@ -280,12 +284,16 @@ export async function generateReauthLink(
   const url = `${authBaseUrl()}/v1/reauthuri`;
   logger.debug(`Requesting re-auth link from ${url}`);
 
-  const res = await axios.post<{ result: string; success: boolean }>(url, {
-    response_type: 'code',
-    refresh_token: refreshToken,
-    redirect_uri: redirectUri,
-    state,
-  });
+  const res = await axios.post<{ result: string; success: boolean }>(
+    url,
+    {
+      response_type: 'code',
+      refresh_token: refreshToken,
+      redirect_uri: redirectUri,
+      state,
+    },
+    { timeout: HTTP_TIMEOUT_MS }
+  );
 
   if (!res.data?.result) {
     throw new Error('TrueLayer returned no re-auth URL');

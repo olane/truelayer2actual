@@ -6,14 +6,22 @@ import express, {
   type Response,
 } from 'express';
 import { loadAllConnections, getConnection, deleteConnection } from '../auth/tokens.js';
-import { loadConfig, removeAccountsForConnection } from '../config.js';
-import { withActual, getActualAccounts, getActualError } from '../clients/actual.js';
+import { loadConfig, removeAccountsForConnection, listBudgets, addBudget, generateBudgetId } from '../config.js';
+import { withBudget, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
-import { startNewAuth, startReauth, processCallback, savePairings } from './oauth.js';
+import {
+  startNewAuth,
+  startReauth,
+  processCallback,
+  savePairings,
+  getPairingSession,
+  type PairingSelection,
+} from './oauth.js';
 import {
   dashboardPage,
   pairingPage,
   messagePage,
+  type BudgetAccounts,
   type ConnectionStatus,
   type ConnectionView,
 } from './pages.js';
@@ -215,19 +223,72 @@ export function createApp(): Express {
         return;
       }
 
-      const actualAccounts = await withActual(() => getActualAccounts());
+      res.redirect('/pair/' + encodeURIComponent(outcome.pairingId));
+    })
+  );
+
+  app.get(
+    '/pair/:pairingId',
+    asyncHandler(async (req, res) => {
+      const pairingId = req.params.pairingId;
+      const session = getPairingSession(pairingId);
+      if (!session) {
+        res
+          .status(404)
+          .send(messagePage('Session expired', 'Pairing session expired. Start again from the dashboard.', { error: true }));
+        return;
+      }
+
+      const budgets = await listBudgets();
+      const budgetAccounts: BudgetAccounts[] = [];
+      for (const budget of budgets) {
+        try {
+          const accounts = await withBudget(budget, () => getActualAccounts());
+          budgetAccounts.push({ budget, accounts });
+        } catch (err) {
+          logger.warn(
+            `Could not load accounts for budget "${budget.name}":`,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
+      }
+
       res.send(
         pairingPage({
-          pairingId: outcome.pairingId,
-          provider: outcome.session.provider,
-          items: outcome.session.items,
-          actualAccounts,
+          pairingId,
+          provider: session.provider,
+          items: session.items,
+          budgetAccounts,
           message:
-            outcome.session.mode === 'reauth'
+            session.mode === 'reauth'
               ? 'Reconnected. Confirm any new accounts below.'
               : undefined,
         })
       );
+    })
+  );
+
+  app.post(
+    '/budgets',
+    asyncHandler(async (req, res) => {
+      const name = asString(req.body?.name);
+      const syncId = asString(req.body?.syncId);
+      const pairingId = asString(req.body?.pairingId);
+
+      if (!name || !syncId) {
+        res
+          .status(400)
+          .send(messagePage('Invalid request', 'Budget name and sync ID are both required.', { error: true }));
+        return;
+      }
+
+      await addBudget({ id: generateBudgetId(), name, syncId });
+
+      if (pairingId) {
+        res.redirect('/pair/' + encodeURIComponent(pairingId));
+      } else {
+        res.redirect('/?msg=' + encodeURIComponent(`Added budget "${name}".`));
+      }
     })
   );
 
@@ -239,13 +300,25 @@ export function createApp(): Express {
         res.status(400).send(messagePage('Invalid request', 'Missing pairing session.', { error: true }));
         return;
       }
-      const mapping: Record<string, string> = {};
-      for (const [key, value] of Object.entries(req.body as Record<string, unknown>)) {
-        if (key.startsWith('map_') && typeof value === 'string' && value) {
-          mapping[key.slice('map_'.length)] = value;
+
+      const session = getPairingSession(pairingId);
+      if (!session) {
+        res
+          .status(400)
+          .send(messagePage('Session expired', 'Pairing session expired. Start again from the dashboard.', { error: true }));
+        return;
+      }
+
+      const selections: Record<string, PairingSelection> = {};
+      for (const item of session.items) {
+        const budgetId = asString(req.body?.[`budget_${item.truelayerAccountId}`]);
+        const actualAccountId = asString(req.body?.[`map_${item.truelayerAccountId}`]);
+        if (budgetId && actualAccountId) {
+          selections[item.truelayerAccountId] = { budgetId, actualAccountId };
         }
       }
-      const { saved } = await savePairings(pairingId, mapping);
+
+      const { saved } = await savePairings(pairingId, selections);
       res.redirect('/?msg=' + encodeURIComponent(`Saved ${saved} pairing(s).`));
     })
   );

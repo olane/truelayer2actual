@@ -21,6 +21,7 @@ import {
   saveConfig,
   mergeAccounts,
   reconcileConfigAccounts,
+  budgetFromEnv,
   type Account,
 } from '../config.js';
 import { withStateLock } from '../util/lock.js';
@@ -94,6 +95,17 @@ function consumePairing(id: string): PairingSession | undefined {
   if (!session) return undefined;
   pairingSessions.delete(id);
   if (Date.now() - session.createdAt > PENDING_TTL_MS) return undefined;
+  return session;
+}
+
+/** Non-consuming lookup so a pairing can span multiple requests. */
+export function getPairingSession(id: string): PairingSession | undefined {
+  const session = pairingSessions.get(id);
+  if (!session) return undefined;
+  if (Date.now() - session.createdAt > PENDING_TTL_MS) {
+    pairingSessions.delete(id);
+    return undefined;
+  }
   return session;
 }
 
@@ -330,9 +342,14 @@ export interface SavePairingsResult {
   saved: number;
 }
 
+export interface PairingSelection {
+  budgetId: string;
+  actualAccountId: string;
+}
+
 export async function savePairings(
   pairingId: string,
-  mapping: Record<string, string>
+  selections: Record<string, PairingSelection>
 ): Promise<SavePairingsResult> {
   return withStateLock(async () => {
     const session = consumePairing(pairingId);
@@ -342,14 +359,15 @@ export async function savePairings(
 
     const incoming: Account[] = [];
     for (const item of session.items) {
-      const actualAccountId = mapping[item.truelayerAccountId];
-      if (!actualAccountId) continue;
+      const selection = selections[item.truelayerAccountId];
+      if (!selection) continue;
       incoming.push({
         name: item.name,
         connectionId: session.connectionId,
+        budgetId: selection.budgetId,
         accountKind: item.accountKind,
         truelayerAccountId: item.truelayerAccountId,
-        actualAccountId,
+        actualAccountId: selection.actualAccountId,
         currency: item.currency,
       });
     }
@@ -361,8 +379,15 @@ export async function savePairings(
       existingConfig = null;
     }
 
+    let budgets = existingConfig?.budgets ?? [];
+    if (budgets.length === 0) {
+      const envBudget = budgetFromEnv();
+      if (envBudget) budgets = [envBudget];
+    }
+
     const merged = mergeAccounts(existingConfig?.accounts ?? [], incoming);
     await saveConfig({
+      budgets,
       accounts: merged,
       createdAt: existingConfig?.createdAt ?? new Date().toISOString(),
     });

@@ -58,6 +58,44 @@ export function generateBudgetId(): string {
   return `budget_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
 }
 
+/** Thrown when a budget would reuse the sync id of another configured budget. */
+export class DuplicateSyncIdError extends Error {
+  constructor(
+    public readonly syncId: string,
+    public readonly existing: Budget
+  ) {
+    super(
+      `Sync ID ${syncId} is already used by budget "${existing.name}". ` +
+        'Each Actual budget has its own sync ID (Actual → Settings → Advanced).'
+    );
+    this.name = 'DuplicateSyncIdError';
+  }
+}
+
+/**
+ * Find a budget other than `excludeId` that already uses `syncId`. Two budgets
+ * pointing at the same sync id are the same Actual file, so they would list
+ * identical accounts under different names.
+ */
+export function findBudgetBySyncId(
+  budgets: Budget[],
+  syncId: string,
+  excludeId?: string
+): Budget | undefined {
+  return budgets.find((b) => b.syncId === syncId && b.id !== excludeId);
+}
+
+/** Group budgets that share a sync id; only groups of two or more are returned. */
+export function duplicateSyncIdGroups(budgets: Budget[]): Budget[][] {
+  const bySyncId = new Map<string, Budget[]>();
+  for (const budget of budgets) {
+    const group = bySyncId.get(budget.syncId) ?? [];
+    group.push(budget);
+    bySyncId.set(budget.syncId, group);
+  }
+  return [...bySyncId.values()].filter((group) => group.length > 1);
+}
+
 /**
  * Normalise a parsed config so legacy files keep working: seed a "default"
  * budget from env vars when none are defined, and make sure any account that
@@ -197,7 +235,10 @@ export async function listBudgets(): Promise<Budget[]> {
   return envBudget ? [envBudget] : [];
 }
 
-/** Add or update a budget, creating the config file on first use. */
+/**
+ * Add or update a budget, creating the config file on first use. Rejects a
+ * sync id that another budget already uses (see {@link DuplicateSyncIdError}).
+ */
 export async function addBudget(budget: Budget): Promise<Budget[]> {
   return withStateLock(async () => {
     let config: Config;
@@ -206,6 +247,9 @@ export async function addBudget(budget: Budget): Promise<Budget[]> {
     } catch {
       config = { budgets: [], accounts: [], createdAt: new Date().toISOString() };
     }
+
+    const clash = findBudgetBySyncId(config.budgets, budget.syncId, budget.id);
+    if (clash) throw new DuplicateSyncIdError(budget.syncId, clash);
 
     const idx = config.budgets.findIndex((b) => b.id === budget.id);
     if (idx === -1) config.budgets.push(budget);

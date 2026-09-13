@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { logger } from './logger.js';
+import { atomicWriteFile } from './util/fs.js';
 
 const AccountSchema = z.object({
   name: z.string(),
@@ -55,18 +56,31 @@ export async function loadConfig(): Promise<Config> {
 }
 
 export async function saveConfig(config: Config): Promise<void> {
-  const dir = path.dirname(CONFIG_PATH);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
   const result = ConfigSchema.safeParse(config);
   if (!result.success) {
     throw new Error(`Cannot save invalid config: ${result.error.message}`);
   }
 
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(result.data, null, 2) + '\n', {
-    encoding: 'utf-8',
-  });
+  atomicWriteFile(CONFIG_PATH, JSON.stringify(result.data, null, 2) + '\n');
   logger.debug(`Saved config to ${CONFIG_PATH}`);
+}
+
+/**
+ * Merge incoming account pairings into an existing list, keyed by
+ * `truelayerAccountId`. Existing entries keep any fields not overwritten
+ * (notably `lastSyncedAt`) so re-auth never resets sync history.
+ */
+export function mergeAccounts(existing: Account[], incoming: Account[]): Account[] {
+  const merged: Account[] = [...existing];
+  for (const account of incoming) {
+    const idx = merged.findIndex(
+      (a) => a.truelayerAccountId === account.truelayerAccountId
+    );
+    if (idx !== -1) {
+      merged[idx] = { ...merged[idx], ...account };
+    } else {
+      merged.push(account);
+    }
+  }
+  return merged;
 }

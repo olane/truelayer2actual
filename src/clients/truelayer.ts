@@ -37,20 +37,44 @@ export interface TrueLayerBalance {
   currency: string;
 }
 
+export interface TrueLayerMe {
+  consent_expires_at?: string;
+  consent_status?: string;
+  provider?: { provider_id?: string; display_name?: string };
+  scopes?: string[];
+}
+
+export class ConsentExpiredError extends Error {
+  constructor(message = 'TrueLayer consent has expired') {
+    super(message);
+    this.name = 'ConsentExpiredError';
+  }
+}
+
 interface TrueLayerResponse<T> {
   results: T[];
   status: string;
 }
 
-function isSandbox(): boolean {
+export function isSandbox(): boolean {
   const clientId = process.env.TRUELAYER_CLIENT_ID ?? '';
   return clientId.startsWith('sandbox-');
 }
 
-function baseUrl(): string {
+export function apiBaseUrl(): string {
   return isSandbox()
     ? 'https://api.truelayer-sandbox.com'
     : 'https://api.truelayer.com';
+}
+
+export function authBaseUrl(): string {
+  return isSandbox()
+    ? 'https://auth.truelayer-sandbox.com'
+    : 'https://auth.truelayer.com';
+}
+
+function baseUrl(): string {
+  return apiBaseUrl();
 }
 
 function authHeaders(accessToken: string): Record<string, string> {
@@ -209,4 +233,62 @@ export async function fetchBalance(
   } catch (err) {
     handleAxiosError(err, `fetchBalance(accountId=${accountId})`);
   }
+}
+
+/**
+ * Fetch connection metadata for the access token's connection.
+ *
+ * A 403 means the access token is fine but the underlying consent has lapsed —
+ * callers should mark the connection as needing re-auth rather than treating it
+ * as a fatal error.
+ */
+export async function getMe(accessToken: string): Promise<TrueLayerMe> {
+  const url = `${baseUrl()}/data/v1/me`;
+  logger.debug(`Fetching connection metadata from ${url}`);
+
+  try {
+    const res = await axios.get<TrueLayerResponse<TrueLayerMe>>(url, {
+      headers: authHeaders(accessToken),
+    });
+    const me = res.data.results[0];
+    if (!me) throw new Error('No metadata returned by /data/v1/me');
+    return me;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 403) {
+      throw new ConsentExpiredError(
+        `TrueLayer /me returned 403: ${JSON.stringify(err.response.data)}`
+      );
+    }
+    handleAxiosError(err, 'getMe');
+  }
+}
+
+/**
+ * Generate a re-authentication link for an existing connection.
+ *
+ * Uses the ungated `POST /v1/reauthuri` endpoint (no client_secret, no consent
+ * screen review). Reuses the existing connection so account mappings and sync
+ * history are preserved. UK-only; throws an axios error on 401 when the refresh
+ * token / grace window has lapsed, in which case callers should fall back to a
+ * full authorization flow.
+ */
+export async function generateReauthLink(
+  refreshToken: string,
+  redirectUri: string,
+  state: string
+): Promise<string> {
+  const url = `${authBaseUrl()}/v1/reauthuri`;
+  logger.debug(`Requesting re-auth link from ${url}`);
+
+  const res = await axios.post<{ result: string; success: boolean }>(url, {
+    response_type: 'code',
+    refresh_token: refreshToken,
+    redirect_uri: redirectUri,
+    state,
+  });
+
+  if (!res.data?.result) {
+    throw new Error('TrueLayer returned no re-auth URL');
+  }
+  return res.data.result;
 }

@@ -6,7 +6,15 @@ import express, {
   type Response,
 } from 'express';
 import { loadAllConnections, getConnection, deleteConnection } from '../auth/tokens.js';
-import { loadConfig, removeAccountsForConnection, listBudgets, addBudget, generateBudgetId } from '../config.js';
+import {
+  loadConfig,
+  removeAccountsForConnection,
+  listBudgets,
+  addBudget,
+  generateBudgetId,
+  duplicateSyncIdGroups,
+  DuplicateSyncIdError,
+} from '../config.js';
 import { withBudget, getActualAccounts, getActualError } from '../clients/actual.js';
 import { runSync } from '../commands/sync.js';
 import {
@@ -83,6 +91,23 @@ async function buildConnectionViews(): Promise<ConnectionView[]> {
       reason: tokens.reauthReason,
     };
   });
+}
+
+/**
+ * Explain budgets that point at the same Actual file. They necessarily list the
+ * same accounts, which otherwise looks like the wrong budget being loaded.
+ */
+function duplicateSyncIdWarning(budgets: Awaited<ReturnType<typeof listBudgets>>): string | undefined {
+  const groups = duplicateSyncIdGroups(budgets);
+  if (groups.length === 0) return undefined;
+  const names = groups
+    .map((group) => group.map((b) => `"${b.name}"`).join(' and '))
+    .join('; ');
+  return (
+    `Budgets ${names} share the same sync ID, so they are the same Actual budget and show ` +
+    'identical accounts. Each Actual budget has its own sync ID (Actual → Settings → Advanced); ' +
+    'correct the sync ID in data/config.json.'
+  );
 }
 
 function bannerFromQuery(req: Request): { message?: string; error?: string } {
@@ -259,6 +284,10 @@ export function createApp(): Express {
           provider: session.provider,
           items: session.items,
           budgetAccounts,
+          warning:
+            [duplicateSyncIdWarning(budgets), asString(req.query.err)]
+              .filter((w): w is string => Boolean(w))
+              .join(' ') || undefined,
           message:
             session.mode === 'reauth'
               ? 'Reconnected. Confirm any new accounts below.'
@@ -283,7 +312,21 @@ export function createApp(): Express {
         return;
       }
 
-      await addBudget({ id: generateBudgetId(), name, syncId, encryptionPassword });
+      try {
+        await addBudget({ id: generateBudgetId(), name, syncId, encryptionPassword });
+      } catch (err) {
+        if (err instanceof DuplicateSyncIdError) {
+          if (pairingId) {
+            res.redirect(
+              '/pair/' + encodeURIComponent(pairingId) + '?err=' + encodeURIComponent(err.message)
+            );
+          } else {
+            res.status(400).send(messagePage('Budget not added', err.message, { error: true }));
+          }
+          return;
+        }
+        throw err;
+      }
 
       if (pairingId) {
         res.redirect('/pair/' + encodeURIComponent(pairingId));

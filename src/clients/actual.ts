@@ -113,6 +113,12 @@ export async function switchBudget(budget: ActualBudgetRef): Promise<void> {
     }
     lastActualError = null;
   } catch (err) {
+    // `downloadBudget` mutates the process-global "current budget" before it
+    // can reject: it closes whatever is loaded, and when the target is already
+    // in the local cache it loads that budget before the remote sync that may
+    // fail. `activeSyncId` no longer describes what Actual actually has loaded,
+    // so forget it and force the next switch to re-establish the budget.
+    activeSyncId = null;
     lastActualError = err instanceof Error ? err.message : String(err);
     throw err;
   }

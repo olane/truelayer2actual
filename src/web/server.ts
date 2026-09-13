@@ -84,9 +84,47 @@ function bannerFromQuery(req: Request): { message?: string; error?: string } {
   };
 }
 
+/**
+ * CSRF hardening for the unauthenticated state-changing POST routes: reject
+ * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
+ * without an Origin (curl, older clients) are allowed; this is defence in depth
+ * on top of the proxy's LAN/basic-auth control, not a substitute for it.
+ */
+function originAllowed(req: Request): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return false;
+  }
+  if (originHost === req.headers.host) return true;
+  const dashboard = process.env.DASHBOARD_URL;
+  if (dashboard) {
+    try {
+      if (new URL(dashboard).host === originHost) return true;
+    } catch {
+      // ignore malformed DASHBOARD_URL
+    }
+  }
+  return false;
+}
+
 export function createApp(): Express {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
+
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && !originAllowed(req)) {
+      logger.warn('Rejected cross-origin POST:', req.headers.origin ?? '(none)', req.path);
+      res
+        .status(403)
+        .send(messagePage('Forbidden', 'Cross-origin request rejected.', { error: true }));
+      return;
+    }
+    next();
+  });
 
   app.get(
     '/',

@@ -82,6 +82,7 @@ SETUP_PORT=3000
 # Dashboard / notifications (npm run serve)
 PORT=3000                 # falls back to SETUP_PORT, then 3000
 DASHBOARD_URL=https://truelayer.example.com
+PUBLIC_ORIGIN=            # optional: public origin(s) allowed for dashboard POSTs
 REAUTH_WARN_DAYS=14       # warn/notify when consent expires within this many days
 NTFY_URL=                 # optional: full ntfy topic URL
 HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL

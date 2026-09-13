@@ -17,6 +17,13 @@ import {
   type ConnectionStatus,
   type ConnectionView,
 } from './pages.js';
+import {
+  generateCsrfSecret,
+  createCsrfToken,
+  isCsrfTokenValid,
+  originAllowed,
+  parseOriginHostname,
+} from './csrf.js';
 import { logger } from '../logger.js';
 
 function asyncHandler(
@@ -85,43 +92,49 @@ function bannerFromQuery(req: Request): { message?: string; error?: string } {
 }
 
 /**
- * CSRF hardening for the unauthenticated state-changing POST routes: reject
- * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
- * without an Origin (curl, older clients) are allowed; this is defence in depth
- * on top of the proxy's LAN/basic-auth control, not a substitute for it.
+ * Fixed set of hostnames allowed as request Origins for state-changing POSTs.
+ * Built from PUBLIC_ORIGIN and DASHBOARD_URL; loopback hosts are always allowed
+ * (see `originAllowed`). The request `Host` header is deliberately not used:
+ * during DNS rebinding the browser presents the attacker's hostname there.
  */
-function originAllowed(req: Request): boolean {
-  const origin = req.headers.origin;
-  if (!origin) return true;
-  let originHost: string;
-  try {
-    originHost = new URL(origin).host;
-  } catch {
-    return false;
+function configuredOriginHostnames(): Set<string> {
+  const hostnames = new Set<string>();
+  for (const raw of [process.env.PUBLIC_ORIGIN, process.env.DASHBOARD_URL]) {
+    if (!raw) continue;
+    const hostname = parseOriginHostname(raw);
+    if (hostname) hostnames.add(hostname.toLowerCase());
   }
-  if (originHost === req.headers.host) return true;
-  const dashboard = process.env.DASHBOARD_URL;
-  if (dashboard) {
-    try {
-      if (new URL(dashboard).host === originHost) return true;
-    } catch {
-      // ignore malformed DASHBOARD_URL
-    }
-  }
-  return false;
+  return hostnames;
 }
 
 export function createApp(): Express {
   const app = express();
+  const csrfSecret = generateCsrfSecret();
+  const csrfToken = createCsrfToken(csrfSecret);
+  const allowedOrigins = configuredOriginHostnames();
+
   app.use(express.urlencoded({ extended: true }));
 
   app.use((req, res, next) => {
-    if (req.method === 'POST' && !originAllowed(req)) {
-      logger.warn('Rejected cross-origin POST:', req.headers.origin ?? '(none)', req.path);
-      res
-        .status(403)
-        .send(messagePage('Forbidden', 'Cross-origin request rejected.', { error: true }));
-      return;
+    if (req.method === 'POST') {
+      if (!originAllowed(req.headers.origin, allowedOrigins)) {
+        logger.warn(
+          'Rejected POST with disallowed/missing Origin:',
+          req.headers.origin ?? '(none)',
+          req.path
+        );
+        res
+          .status(403)
+          .send(messagePage('Forbidden', 'Cross-origin request rejected.', { error: true }));
+        return;
+      }
+      if (!isCsrfTokenValid(csrfSecret, req.body?._csrf)) {
+        logger.warn('Rejected POST with invalid CSRF token:', req.path);
+        res
+          .status(403)
+          .send(messagePage('Forbidden', 'Invalid CSRF token.', { error: true }));
+        return;
+      }
     }
     next();
   });
@@ -130,7 +143,7 @@ export function createApp(): Express {
     '/',
     asyncHandler(async (req, res) => {
       const connections = await buildConnectionViews();
-      res.send(dashboardPage({ connections, ...bannerFromQuery(req) }));
+      res.send(dashboardPage({ connections, csrfToken, ...bannerFromQuery(req) }));
     })
   );
 
@@ -163,7 +176,7 @@ export function createApp(): Express {
     })
   );
 
-  app.get('/auth/new', (_req, res) => {
+  app.post('/auth/new', (_req, res) => {
     const { url } = startNewAuth();
     res.redirect(url);
   });
@@ -208,6 +221,7 @@ export function createApp(): Express {
           provider: outcome.session.provider,
           items: outcome.session.items,
           actualAccounts,
+          csrfToken,
           message:
             outcome.session.mode === 'reauth'
               ? 'Reconnected. Confirm any new accounts below.'

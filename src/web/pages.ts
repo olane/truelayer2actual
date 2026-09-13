@@ -77,6 +77,7 @@ export interface ConnectionView {
 
 export interface DashboardData {
   connections: ConnectionView[];
+  csrfToken: string;
   message?: string;
   error?: string;
 }
@@ -111,6 +112,7 @@ export function dashboardPage(data: DashboardData): string {
         ${reason}
         <div class="row">
           <form method="post" action="/connections/${encodeURIComponent(c.id)}/reauth">
+            <input type="hidden" name="_csrf" value="${escapeHtml(data.csrfToken)}">
             <button class="primary" type="submit">Reconnect</button>
           </form>
         </div>
@@ -125,8 +127,14 @@ export function dashboardPage(data: DashboardData): string {
     `<h1>TrueLayer to Actual</h1>
      ${banners}
      <div class="row">
-       <form method="get" action="/auth/new"><button class="primary" type="submit">Add bank</button></form>
-       <form method="post" action="/sync"><button type="submit">Sync now</button></form>
+       <form method="post" action="/auth/new">
+         <input type="hidden" name="_csrf" value="${escapeHtml(data.csrfToken)}">
+         <button class="primary" type="submit">Add bank</button>
+       </form>
+       <form method="post" action="/sync">
+         <input type="hidden" name="_csrf" value="${escapeHtml(data.csrfToken)}">
+         <button type="submit">Sync now</button>
+       </form>
      </div>
      ${data.connections.length ? cards : empty}`
   );
@@ -137,6 +145,7 @@ export interface PairingPageOptions {
   provider: string;
   items: PairingItem[];
   actualAccounts: ActualAccount[];
+  csrfToken: string;
   message?: string;
 }
 
@@ -170,8 +179,9 @@ export function pairingPage(options: PairingPageOptions): string {
     `<h1>Pair ${escapeHtml(options.provider)} accounts</h1>
      ${options.message ? `<div class="banner">${escapeHtml(options.message)}</div>` : ''}
      <p>Choose the matching Actual Budget account for each bank account. Leave anything you do not want to import set to "skip".</p>
-     <form method="post" action="/pair">
+      <form method="post" action="/pair">
        <input type="hidden" name="pairingId" value="${escapeHtml(options.pairingId)}">
+       <input type="hidden" name="_csrf" value="${escapeHtml(options.csrfToken)}">
        <table>
          <thead><tr><th>TrueLayer</th><th>Actual account</th></tr></thead>
          <tbody>${rows}</tbody>

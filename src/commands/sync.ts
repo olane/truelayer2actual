@@ -80,7 +80,8 @@ export function syncLookbackDays(): number {
 }
 
 export function dashboardUrl(): string {
-  return process.env.DASHBOARD_URL ?? 'https://truelayer.olane.dev';
+  const port = process.env.PORT ?? process.env.SETUP_PORT ?? '3000';
+  return process.env.DASHBOARD_URL ?? `http://localhost:${port}`;
 }
 
 function reauthWarnDays(): number {

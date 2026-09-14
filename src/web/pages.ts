@@ -1,15 +1,9 @@
 import type { ActualAccount } from '../clients/actual.js';
 import type { Budget } from '../config.js';
+import { escapeHtml } from '../util/html.js';
 import type { PairingItem } from './oauth.js';
 
-export function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+export { escapeHtml };
 
 const STYLES = `
   :root { color-scheme: light dark; }

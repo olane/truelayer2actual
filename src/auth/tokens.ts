@@ -7,6 +7,7 @@ import { logger } from '../logger.js';
 import { atomicWriteFile } from '../util/fs.js';
 import { withStateLock } from '../util/lock.js';
 import { HTTP_TIMEOUT_MS } from '../util/http.js';
+import { tokenUrl } from '../clients/truelayer.js';
 
 const TokenSchema = z.object({
   accessToken: z.string(),
@@ -51,16 +52,6 @@ const TokensFileSchema = z.object({
 type TokensFile = z.infer<typeof TokensFileSchema>;
 
 const TOKENS_PATH = path.join(process.cwd(), 'data', 'tokens.json');
-
-function isSandbox(): boolean {
-  return (process.env.TRUELAYER_CLIENT_ID ?? '').startsWith('sandbox-');
-}
-
-function tokenUrl(): string {
-  return isSandbox()
-    ? 'https://auth.truelayer-sandbox.com/connect/token'
-    : 'https://auth.truelayer.com/connect/token';
-}
 
 function readTokensFile(): TokensFile {
   if (!fs.existsSync(TOKENS_PATH)) {

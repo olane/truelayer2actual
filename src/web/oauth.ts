@@ -17,7 +17,7 @@ import {
 } from '../auth/oauth.js';
 import { generateReauthLink, getMe } from '../clients/truelayer.js';
 import {
-  loadConfig,
+  loadConfigIfPresent,
   saveConfig,
   mergeAccounts,
   reconcileConfigAccounts,
@@ -290,12 +290,7 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
     const existingTokens = getConnection(connectionId);
     saveConnection(connectionId, existingTokens ? { ...existingTokens, ...tokens } : tokens);
 
-    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
-    try {
-      config = await loadConfig();
-    } catch {
-      config = null;
-    }
+    const config = await loadConfigIfPresent();
 
     if (config) {
       const result = reconcileConfigAccounts(config.accounts, {
@@ -380,12 +375,7 @@ export async function savePairings(
       });
     }
 
-    let existingConfig: Awaited<ReturnType<typeof loadConfig>> | null = null;
-    try {
-      existingConfig = await loadConfig();
-    } catch {
-      existingConfig = null;
-    }
+    const existingConfig = await loadConfigIfPresent();
 
     let budgets = existingConfig?.budgets ?? [];
     if (budgets.length === 0) {

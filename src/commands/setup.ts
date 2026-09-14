@@ -25,7 +25,7 @@ import {
   type ActualAccount,
 } from '../clients/actual.js';
 import {
-  loadConfig,
+  loadConfigIfPresent,
   saveConfig,
   mergeAccounts,
   budgetFromEnv,
@@ -379,12 +379,7 @@ async function main(): Promise<void> {
   }
 
   // Load existing config to preserve lastSyncedAt for re-authenticated accounts
-  let existingConfig: Config | null = null;
-  try {
-    existingConfig = await loadConfig();
-  } catch {
-    // First run
-  }
+  const existingConfig = await loadConfigIfPresent();
 
   // Merge: keep existing accounts, overwrite any that were re-paired, append new ones
   const existingAccounts = existingConfig?.accounts ?? [];

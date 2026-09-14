@@ -3,11 +3,15 @@ import {
   authBaseUrl,
   fetchAccounts,
   fetchCards,
+  isSandbox,
+  tokenUrl,
   type TrueLayerAccount,
   type TrueLayerCard,
 } from '../clients/truelayer.js';
 import type { Tokens } from './tokens.js';
 import { HTTP_TIMEOUT_MS } from '../util/http.js';
+
+export { isSandbox };
 
 export function requireEnv(name: string): string {
   const value = process.env[name];
@@ -18,16 +22,6 @@ export function requireEnv(name: string): string {
     );
   }
   return value;
-}
-
-export function isSandbox(clientId = process.env.TRUELAYER_CLIENT_ID ?? ''): boolean {
-  return clientId.startsWith('sandbox-');
-}
-
-export function tokenUrl(sandbox: boolean): string {
-  return sandbox
-    ? 'https://auth.truelayer-sandbox.com/connect/token'
-    : 'https://auth.truelayer.com/connect/token';
 }
 
 /**
@@ -49,7 +43,7 @@ export function buildAuthUrl(
     prompt: 'consent',
   });
   if (state) params.set('state', state);
-  return `${authBaseUrl()}/?${params.toString()}`;
+  return `${authBaseUrl(sandbox)}/?${params.toString()}`;
 }
 
 export interface ExchangeOptions {

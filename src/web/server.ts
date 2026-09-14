@@ -7,7 +7,7 @@ import express, {
 } from 'express';
 import { loadAllConnections, getConnection, deleteConnection, refreshConnectionIfNeeded } from '../auth/tokens.js';
 import {
-  loadConfig,
+  loadConfigIfPresent,
   updateConfig,
   mergeAccounts,
   removeAccountsForConnection,
@@ -66,12 +66,7 @@ function reauthWarnDays(): number {
 async function buildConnectionViews(): Promise<ConnectionView[]> {
   const connections = loadAllConnections();
 
-  let accounts: Awaited<ReturnType<typeof loadConfig>>['accounts'] = [];
-  try {
-    accounts = (await loadConfig()).accounts;
-  } catch {
-    accounts = [];
-  }
+  const accounts = (await loadConfigIfPresent())?.accounts ?? [];
 
   return Object.entries(connections).map(([id, tokens]) => {
     const mine = accounts.filter((a) => a.connectionId === id);
@@ -387,12 +382,9 @@ export function createApp(): Express {
         return;
       }
 
-      let accounts: Account[] = [];
-      try {
-        accounts = (await loadConfig()).accounts.filter((a) => a.connectionId === connectionId);
-      } catch {
-        accounts = [];
-      }
+      const accounts = ((await loadConfigIfPresent())?.accounts ?? []).filter(
+        (a) => a.connectionId === connectionId
+      );
 
       const budgets = await listBudgets();
       const [budgetAccounts, pairing] = await Promise.all([
@@ -585,9 +577,15 @@ export function createApp(): Express {
   );
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    logger.error('HTTP request failed:', err.message);
-    res.status(500).send(messagePage('Something went wrong', err.message, { error: true }));
+  app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+    logger.error(`HTTP ${req.method} ${req.path} failed:`, err.message);
+    res.status(500).send(
+      messagePage(
+        'Something went wrong',
+        'An unexpected error occurred. Check the server logs for details.',
+        { error: true }
+      )
+    );
   });
 
   return app;

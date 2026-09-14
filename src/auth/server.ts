@@ -1,6 +1,7 @@
 import http from 'http';
 import express, { type Express } from 'express';
 import { logger } from '../logger.js';
+import { escapeHtml } from '../util/html.js';
 
 export interface AuthServer {
   app: Express;
@@ -33,8 +34,8 @@ export async function startAuthServer(port: number): Promise<AuthServer> {
           <head><title>Authentication Failed</title></head>
           <body>
             <h2>Authentication Failed</h2>
-            <p>Error: ${String(error)}</p>
-            <p>${errorDescription}</p>
+            <p>Error: ${escapeHtml(String(error))}</p>
+            <p>${escapeHtml(errorDescription)}</p>
             <p>Please close this tab and check the terminal for details.</p>
           </body>
         </html>

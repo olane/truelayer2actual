@@ -17,7 +17,7 @@ import {
 } from '../auth/oauth.js';
 import { generateReauthLink, getMe } from '../clients/truelayer.js';
 import {
-  loadConfig,
+  loadConfigIfPresent,
   saveConfig,
   mergeAccounts,
   reconcileConfigAccounts,
@@ -42,11 +42,25 @@ export interface PendingAuth {
 
 const pendingAuth = new Map<string, PendingAuth>();
 
+/**
+ * Drop expired entries so the in-memory stores cannot grow without bound on a
+ * long-running server (e.g. repeated hits on /auth/new that never complete).
+ */
+function pruneExpired<T extends { createdAt: number }>(
+  map: Map<string, T>,
+  now = Date.now()
+): void {
+  for (const [key, entry] of map) {
+    if (now - entry.createdAt > PENDING_TTL_MS) map.delete(key);
+  }
+}
+
 export function createState(): string {
   return crypto.randomBytes(16).toString('hex');
 }
 
 export function setPending(state: string, entry: Omit<PendingAuth, 'createdAt'>): void {
+  pruneExpired(pendingAuth);
   pendingAuth.set(state, { ...entry, createdAt: Date.now() });
 }
 
@@ -106,6 +120,7 @@ export interface PairingSession {
 const pairingSessions = new Map<string, PairingSession>();
 
 function setPairing(session: Omit<PairingSession, 'createdAt'>): string {
+  pruneExpired(pairingSessions);
   const id = crypto.randomBytes(12).toString('hex');
   pairingSessions.set(id, { ...session, createdAt: Date.now() });
   return id;
@@ -290,12 +305,7 @@ export async function processCallback(params: CallbackParams): Promise<CallbackO
     const existingTokens = getConnection(connectionId);
     saveConnection(connectionId, existingTokens ? { ...existingTokens, ...tokens } : tokens);
 
-    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
-    try {
-      config = await loadConfig();
-    } catch {
-      config = null;
-    }
+    const config = await loadConfigIfPresent();
 
     if (config) {
       const result = reconcileConfigAccounts(config.accounts, {
@@ -380,12 +390,7 @@ export async function savePairings(
       });
     }
 
-    let existingConfig: Awaited<ReturnType<typeof loadConfig>> | null = null;
-    try {
-      existingConfig = await loadConfig();
-    } catch {
-      existingConfig = null;
-    }
+    const existingConfig = await loadConfigIfPresent();
 
     let budgets = existingConfig?.budgets ?? [];
     if (budgets.length === 0) {

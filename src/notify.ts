@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getConnection, saveConnection, type Tokens } from './auth/tokens.js';
+import { getConnection, saveConnection, updateConnection } from './auth/tokens.js';
 import { withStateLock } from './util/lock.js';
 import { HTTP_TIMEOUT_MS } from './util/http.js';
 import { logger } from './logger.js';
@@ -14,10 +14,12 @@ export interface NotifyOptions {
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Send a notification to every configured backend. Never throws: a failed
- * notification must not break sync.
+ * Send a notification to every configured backend and report whether it was
+ * handled — `true` when no backend is configured or at least one delivery
+ * succeeded, `false` when every configured backend failed. Never throws: a
+ * failed notification must not break sync.
  */
-export async function notify(options: NotifyOptions): Promise<void> {
+export async function notify(options: NotifyOptions): Promise<boolean> {
   const tasks: Promise<unknown>[] = [];
 
   const ntfyUrl = process.env.NTFY_URL;
@@ -48,16 +50,33 @@ export async function notify(options: NotifyOptions): Promise<void> {
     );
   }
 
-  if (tasks.length === 0) return;
+  if (tasks.length === 0) return true;
 
   const results = await Promise.allSettled(tasks);
+  let delivered = false;
   for (const result of results) {
-    if (result.status === 'rejected') {
+    if (result.status === 'fulfilled') {
+      delivered = true;
+    } else {
       const reason =
         result.reason instanceof Error ? result.reason.message : String(result.reason);
       logger.warn('Notification delivery failed:', reason);
     }
   }
+  return delivered;
+}
+
+/** Whether a notification for `reason` was already sent within the dedupe window. */
+export function isDuplicateNotification(
+  lastNotifiedAt: string | undefined,
+  lastNotifiedReason: string | undefined,
+  reason: string,
+  nowMs = Date.now()
+): boolean {
+  const last = lastNotifiedAt ? Date.parse(lastNotifiedAt) : NaN;
+  return (
+    Number.isFinite(last) && nowMs - last < DEDUPE_WINDOW_MS && lastNotifiedReason === reason
+  );
 }
 
 /**
@@ -65,8 +84,10 @@ export async function notify(options: NotifyOptions): Promise<void> {
  * recording the time/reason in tokens.json so restarts don't cause a
  * notification storm and a more urgent reason isn't suppressed by a milder one.
  *
- * The dedupe marker is written under the state lock; delivery is
- * fire-and-forget so a slow endpoint can never block sync.
+ * The dedupe marker is written under the state lock before delivery so
+ * concurrent callers can't both send. If every delivery fails the marker is
+ * cleared again, so a transient outage retries on the next sync instead of
+ * suppressing the alert for 24h.
  */
 export async function notifyConnection(
   connectionId: string,
@@ -78,28 +99,29 @@ export async function notifyConnection(
     await withStateLock(async () => {
       const current = getConnection(connectionId);
       if (!current) return;
-      const last = current.lastNotifiedAt ? Date.parse(current.lastNotifiedAt) : NaN;
-      const sameReason = current.lastNotifiedReason === reason;
-      if (Number.isFinite(last) && Date.now() - last < DEDUPE_WINDOW_MS && sameReason) {
+      if (isDuplicateNotification(current.lastNotifiedAt, current.lastNotifiedReason, reason)) {
         logger.debug(`[${connectionId}] Suppressing duplicate ${reason} notification`);
         return;
       }
-      const marked: Tokens = {
+      saveConnection(connectionId, {
         ...current,
         lastNotifiedAt: new Date().toISOString(),
         lastNotifiedReason: reason,
-      };
-      saveConnection(connectionId, marked);
+      });
       shouldSend = true;
     });
 
-    if (shouldSend) {
-      void notify(options).catch((err) => {
-        logger.warn(
-          `[${connectionId}] Notification failed:`,
-          err instanceof Error ? err.message : String(err)
-        );
+    if (!shouldSend) return;
+
+    const delivered = await notify(options);
+    if (!delivered) {
+      await updateConnection(connectionId, {
+        lastNotifiedAt: undefined,
+        lastNotifiedReason: undefined,
       });
+      logger.warn(
+        `[${connectionId}] Notification was not delivered; it will be retried on the next run.`
+      );
     }
   } catch (err) {
     logger.warn(

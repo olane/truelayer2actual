@@ -57,6 +57,22 @@ function reauthWarnDays(): number {
   return Number.isFinite(n) && n >= 0 ? n : 14;
 }
 
+/**
+ * Parse SYNC_INTERVAL_HOURS. Missing/blank means one-shot mode (0). An invalid
+ * value also falls back to one-shot with a warning, so a typo can never spin
+ * the scheduler on a NaN delay.
+ */
+export function resolveIntervalHours(): number {
+  const raw = process.env.SYNC_INTERVAL_HOURS;
+  if (raw === undefined || raw.trim() === '') return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    logger.warn(`Ignoring invalid SYNC_INTERVAL_HOURS "${raw}" — running one-shot.`);
+    return 0;
+  }
+  return n;
+}
+
 function connectionLabel(connectionId: string): string {
   return getConnection(connectionId)?.providerDisplayName ?? connectionId;
 }
@@ -374,7 +390,7 @@ async function main(): Promise<void> {
 }
 
 async function loop(): Promise<void> {
-  const intervalHours = Number(process.env.SYNC_INTERVAL_HOURS ?? '0');
+  const intervalHours = resolveIntervalHours();
 
   if (intervalHours <= 0) {
     // One-shot mode (for external schedulers like Synology Task Scheduler)

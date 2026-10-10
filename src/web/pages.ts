@@ -75,6 +75,22 @@ export interface DashboardData {
   connections: ConnectionView[];
   message?: string;
   error?: string;
+  /** CSP nonce for the page's own inline script, set by the server. */
+  nonce?: string;
+}
+
+/** Confirmation for destructive forms, via a nonce'd listener (no inline handlers). */
+function confirmScript(nonce: string): string {
+  return `
+  <script nonce="${escapeHtml(nonce)}">
+  (function () {
+    Array.prototype.forEach.call(document.querySelectorAll('form[data-confirm]'), function (f) {
+      f.addEventListener('submit', function (e) {
+        if (!window.confirm(f.getAttribute('data-confirm'))) e.preventDefault();
+      });
+    });
+  })();
+  </script>`;
 }
 
 function formatDate(iso?: string): string {
@@ -99,7 +115,7 @@ export function dashboardPage(data: DashboardData): string {
       return `<div class="conn">
         <div class="conn-header">
           <h2>${escapeHtml(c.provider)}</h2>
-          <span class="badge ${c.status}">${escapeHtml(c.status.replace('_', ' '))}</span>
+          <span class="badge ${escapeHtml(c.status)}">${escapeHtml(c.status.replace('_', ' '))}</span>
         </div>
         <div class="muted">Connection <code>${escapeHtml(c.id)}</code></div>
         <div>Accounts mapped: ${c.accountCount} &middot; Last sync: ${formatDate(c.lastSyncedAt)}</div>
@@ -113,7 +129,7 @@ export function dashboardPage(data: DashboardData): string {
             <button class="primary" type="submit">Reconnect</button>
           </form>
           <form method="post" action="/connections/${encodeURIComponent(c.id)}/delete"
-            onsubmit="return confirm('Delete this connection and its account mappings?')">
+            data-confirm="Delete this connection and its account mappings?">
             <button class="danger" type="submit">Delete</button>
           </form>
         </div>
@@ -122,6 +138,7 @@ export function dashboardPage(data: DashboardData): string {
     .join('');
 
   const empty = '<p>No bank connections yet. Add one to get started.</p>';
+  const script = data.connections.length ? confirmScript(data.nonce ?? '') : '';
 
   return layout(
     'TrueLayer to Actual',
@@ -131,7 +148,8 @@ export function dashboardPage(data: DashboardData): string {
        <form method="get" action="/auth/new"><button class="primary" type="submit">Add bank</button></form>
        <form method="post" action="/sync"><button type="submit">Sync now</button></form>
      </div>
-     ${data.connections.length ? cards : empty}`
+     ${data.connections.length ? cards : empty}
+     ${script}`
   );
 }
 
@@ -176,12 +194,14 @@ export interface PairingPageOptions {
   message?: string;
   /** Shown as an error banner, e.g. two budgets sharing one sync id. */
   warning?: string;
+  /** CSP nonce for the page's own inline script, set by the server. */
+  nonce?: string;
 }
 
 /** Show only the accounts that belong to the budget selected in the paired dropdown. */
-function budgetFilterScript(): string {
+function budgetFilterScript(nonce: string): string {
   return `
-  <script>
+  <script nonce="${escapeHtml(nonce)}">
   (function () {
     function sync(budgetSelect) {
       var target = document.getElementById(budgetSelect.getAttribute('data-target'));
@@ -236,7 +256,7 @@ export function pairingPage(options: PairingPageOptions): string {
     ? '<p class="muted">No budgets configured yet — add one below.</p>'
     : '';
 
-  const script = budgetFilterScript();
+  const script = budgetFilterScript(options.nonce ?? '');
 
   return layout(
     'Pair accounts',
@@ -289,6 +309,8 @@ export interface EditPairingsPageOptions {
   warning?: string;
   /** Non-fatal note, e.g. live TrueLayer accounts could not be fetched. */
   note?: string;
+  /** CSP nonce for the page's own inline script, set by the server. */
+  nonce?: string;
 }
 
 /**
@@ -383,7 +405,7 @@ export function editPairingsPage(options: EditPairingsPageOptions): string {
               </table>
               <div class="row"><button class="primary" type="submit">Save pairings</button></div>
             </form>
-            ${budgetFilterScript()}`
+            ${budgetFilterScript(options.nonce ?? '')}`
          : ''
      }
      <p><a href="/">Back to dashboard</a></p>`

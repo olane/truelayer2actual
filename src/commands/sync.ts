@@ -28,6 +28,7 @@ import {
 import { mapTransaction } from '../mapper.js';
 import { notifyConnection } from '../notify.js';
 import { createMutex } from '../util/lock.js';
+import { describeError } from '../util/errors.js';
 import { logger } from '../logger.js';
 import type { Account, Budget } from '../config.js';
 
@@ -124,7 +125,7 @@ async function validateBalance(accessToken: string, account: Account): Promise<v
   } catch (err) {
     logger.warn(
       `[${account.name}] Could not fetch balance for validation:`,
-      err instanceof Error ? err.message : String(err)
+      describeError(err)
     );
     return;
   }
@@ -135,7 +136,7 @@ async function validateBalance(accessToken: string, account: Account): Promise<v
   } catch (err) {
     logger.warn(
       `[${account.name}] Could not fetch Actual balance for validation:`,
-      err instanceof Error ? err.message : String(err)
+      describeError(err)
     );
     return;
   }
@@ -189,7 +190,7 @@ export async function resolveConnectionTokens(
       const accessToken = await refresh(connectionId, tokens);
       accessTokens.set(connectionId, accessToken);
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeError(err);
       if (err instanceof ReauthRequiredError) {
         logger.warn(`[${connectionId}] ${reason} — skipping its accounts this run.`);
         skipped.push({ connectionId, reason });
@@ -233,7 +234,7 @@ async function refreshConnectionMetadata(
     } else {
       logger.debug(
         `[${connectionId}] Could not refresh connection metadata:`,
-        err instanceof Error ? err.message : String(err)
+        describeError(err)
       );
     }
     return;
@@ -274,8 +275,21 @@ export interface SyncSummary {
   errors: { connectionId?: string; account?: string; reason: string }[];
 }
 
+let lastRun: Promise<unknown> = Promise.resolve();
+
+/**
+ * Resolves when the most recent {@link runSync} call finishes (or immediately
+ * when none has started). Lets shutdown wait for an in-flight sync — scheduled
+ * or manual — so state files are never cut off mid-write.
+ */
+export function lastSyncSettled(): Promise<unknown> {
+  return lastRun;
+}
+
 export async function runSync(): Promise<SyncSummary> {
-  return withSyncLock(() => runSyncInternal());
+  const run = withSyncLock(() => runSyncInternal());
+  lastRun = run.catch(() => undefined);
+  return run;
 }
 
 async function syncAccount(
@@ -308,7 +322,7 @@ async function syncAccount(
     lastSyncedAt.set(account.truelayerAccountId, new Date().toISOString());
     summary.synced.push(account.name);
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = describeError(err);
     logger.error(`[${account.name}] Sync failed:`, reason);
     summary.errors.push({
       connectionId: account.connectionId,
@@ -372,7 +386,7 @@ async function runSyncInternal(): Promise<SyncSummary> {
       });
     } catch (err) {
       // A budget that can't be downloaded shouldn't abort the other budgets.
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeError(err);
       logger.error(`[budget ${budget.name}] Failed to switch budget:`, reason);
       for (const account of accounts) {
         summary.errors.push({
@@ -443,7 +457,7 @@ async function loop(): Promise<void> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     await runSync().catch((err) => {
-      logger.error('Sync failed:', err instanceof Error ? err.message : String(err));
+      logger.error('Sync failed:', describeError(err));
     });
     logger.info(`Next sync in ${intervalHours} hour(s)...`);
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
@@ -455,7 +469,7 @@ const isMain =
 
 if (isMain) {
   loop().catch((err) => {
-    logger.error('Fatal error:', err instanceof Error ? err.message : String(err));
+    logger.error('Fatal error:', describeError(err));
     process.exit(1);
   });
 }

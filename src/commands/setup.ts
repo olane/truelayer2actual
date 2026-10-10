@@ -37,6 +37,7 @@ import {
   type Budget,
 } from '../config.js';
 import { logger } from '../logger.js';
+import { describeError } from '../util/errors.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,9 +61,9 @@ async function authenticateBank(
   sandbox: boolean,
   bankNumber: number
 ): Promise<{ connectionId: string; tlAccounts: TrueLayerAccount[]; tlCards: TrueLayerCard[] }> {
-  const { server, waitForCode } = await startAuthServer(port);
+  const { server, waitForCode, authState } = await startAuthServer(port);
 
-  const authUrl = buildAuthUrl(clientId, redirectUri, sandbox);
+  const authUrl = buildAuthUrl(clientId, redirectUri, sandbox, authState);
 
   console.log('\n===========================================================');
   console.log(`Bank ${bankNumber}: Open this URL to authenticate:`);
@@ -76,7 +77,7 @@ async function authenticateBank(
     code = await waitForCode();
   } catch (err) {
     server.close();
-    throw new Error(`OAuth flow failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`OAuth flow failed: ${describeError(err)}`);
   }
 
   server.close();
@@ -417,6 +418,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.error('Setup failed:', err instanceof Error ? err.message : String(err));
+  logger.error('Setup failed:', describeError(err));
   process.exit(1);
 });

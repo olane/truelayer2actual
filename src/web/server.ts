@@ -1,4 +1,6 @@
 import http from 'http';
+import crypto from 'crypto';
+import net from 'net';
 import express, {
   type Express,
   type NextFunction,
@@ -45,6 +47,7 @@ import {
   type PairingRow,
 } from './pages.js';
 import { logger } from '../logger.js';
+import { describeError } from '../util/errors.js';
 
 function asyncHandler(
   fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>
@@ -136,7 +139,7 @@ async function loadBudgetAccounts(budgets: Budget[]): Promise<BudgetAccounts[]> 
     } catch (err) {
       logger.warn(
         `Could not load accounts for budget "${budget.name}":`,
-        err instanceof Error ? err.message : String(err)
+        describeError(err)
       );
     }
   }
@@ -170,7 +173,7 @@ async function loadPairingRows(
       items = toPairingItems({ accounts, cards });
     } catch (err) {
       note = `Could not load accounts from TrueLayer (${
-        err instanceof Error ? err.message : String(err)
+        describeError(err)
       }). Showing saved pairings only.`;
     }
   }
@@ -203,6 +206,44 @@ async function loadPairingRows(
   return { rows, note };
 }
 
+// Name suffixes that only resolve on a LAN / tailnet, so an attacker's public
+// domain can never produce them. Single-label names (`nas`) are also allowed.
+const PRIVATE_NAME_SUFFIXES = ['.local', '.lan', '.home.arpa', '.internal', '.localhost', '.ts.net'];
+
+function hostnameOf(value: string): string | undefined {
+  try {
+    const url = new URL(value.includes('://') ? value : `http://${value}`);
+    return url.hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * DNS-rebinding defence: only serve requests whose Host header names this box
+ * the way a LAN user would — an IP literal, `localhost`, a single-label or
+ * LAN/Tailscale name, the DASHBOARD_URL host, or an entry in ALLOWED_HOSTS
+ * (comma-separated). A rebinding page on an attacker's domain sends that
+ * domain as Host (and matching Origin), so it is rejected here before the
+ * origin check, which it would otherwise pass as "same-origin".
+ */
+export function hostAllowed(hostHeader: string | undefined): boolean {
+  // Browsers always send Host; only non-browser HTTP/1.0 clients omit it.
+  if (!hostHeader) return true;
+  const hostname = hostnameOf(hostHeader);
+  if (!hostname) return false;
+
+  if (net.isIP(hostname.replace(/^\[|\]$/g, ''))) return true;
+  if (hostname === 'localhost' || !hostname.includes('.')) return true;
+  if (PRIVATE_NAME_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) return true;
+
+  const extra = [process.env.DASHBOARD_URL ?? '', ...(process.env.ALLOWED_HOSTS ?? '').split(',')]
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map(hostnameOf);
+  return extra.includes(hostname);
+}
+
 /**
  * CSRF hardening for the unauthenticated state-changing POST routes: reject
  * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
@@ -210,6 +251,11 @@ async function loadPairingRows(
  * on top of the proxy's LAN/basic-auth control, not a substitute for it.
  */
 function originAllowed(req: Request): boolean {
+  // Modern browsers always send this on cross-site requests; `cross-site`
+  // means the initiating page lives on another registrable domain.
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (typeof fetchSite === 'string' && fetchSite === 'cross-site') return false;
+
   const origin = req.headers.origin;
   if (!origin) return true;
   let originHost: string;
@@ -235,6 +281,56 @@ export function createApp(): Express {
   app.use(express.urlencoded({ extended: true }));
 
   app.use((req, res, next) => {
+    const nonce = crypto.randomBytes(16).toString('base64');
+    res.locals.cspNonce = nonce;
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    // `same-origin`, not `no-referrer`: with no-referrer browsers send
+    // `Origin: null` even on same-origin form POSTs, which the origin check
+    // must reject. same-origin still sends no referrer to other sites.
+    res.setHeader('Referrer-Policy', 'same-origin');
+    res.setHeader('Cache-Control', 'no-store');
+    if (!req.path.startsWith('/healthz')) {
+      // A fresh nonce per response lets the strict CSP allow the pages' own
+      // inline scripts while still blocking injected ones. Pages are fully
+      // server-rendered from escaped values with no third-party resources.
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'none'; " +
+          `script-src 'nonce-${nonce}'; ` +
+          "style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; " +
+          "base-uri 'none'; form-action 'self'"
+      );
+    }
+    next();
+  });
+
+  // Host allow-list runs before the origin check (see hostAllowed). /healthz is
+  // exempt so container/orchestrator health checks work whatever Host they
+  // send; it exposes no identifiers.
+  app.use((req, res, next) => {
+    if (req.path === '/healthz' || hostAllowed(req.headers.host)) {
+      next();
+      return;
+    }
+    logger.warn(
+      'Rejected request with unrecognised Host header:',
+      req.headers.host ?? '(none)',
+      req.path
+    );
+    res
+      .status(403)
+      .send(
+        messagePage(
+          'Forbidden',
+          `Host "${req.headers.host ?? ''}" is not allowed. If this is how you reach the ` +
+            'dashboard, add it to ALLOWED_HOSTS (or set DASHBOARD_URL).',
+          { error: true }
+        )
+      );
+  });
+
+  app.use((req, res, next) => {
     if (req.method === 'POST' && !originAllowed(req)) {
       logger.warn('Rejected cross-origin POST:', req.headers.origin ?? '(none)', req.path);
       res
@@ -249,7 +345,9 @@ export function createApp(): Express {
     '/',
     asyncHandler(async (req, res) => {
       const connections = await buildConnectionViews();
-      res.send(dashboardPage({ connections, ...bannerFromQuery(req) }));
+      res.send(
+        dashboardPage({ connections, nonce: res.locals.cspNonce as string, ...bannerFromQuery(req) })
+      );
     })
   );
 
@@ -258,26 +356,18 @@ export function createApp(): Express {
     asyncHandler(async (_req, res) => {
       try {
         const connections = loadAllConnections();
-        const view = Object.entries(connections).map(([id, tokens]) => ({
-          id,
-          provider: tokens.providerDisplayName ?? tokens.providerId ?? null,
+        // Health signals only — this endpoint is unauthenticated, so it must
+        // not leak provider names, connection ids or error detail.
+        const view = Object.values(connections).map((tokens) => ({
           needsReauth: Boolean(tokens.needsReauth),
           consentExpiresAt: tokens.consentExpiresAt ?? null,
         }));
         const actualError = getActualError();
         const degraded = view.some((c) => c.needsReauth) || Boolean(actualError);
-        res.status(200).json({
-          status: degraded ? 'degraded' : 'ok',
-          connections: view,
-          ...(actualError ? { error: actualError } : {}),
-        });
-      } catch (err) {
+        res.status(200).json({ status: degraded ? 'degraded' : 'ok', connections: view });
+      } catch {
         // Never let a corrupt/unreadable tokens.json make the container unhealthy.
-        res.status(200).json({
-          status: 'degraded',
-          connections: [],
-          error: err instanceof Error ? err.message : String(err),
-        });
+        res.status(200).json({ status: 'degraded', connections: [] });
       }
     })
   );
@@ -359,6 +449,7 @@ export function createApp(): Express {
           provider: session.provider,
           items: session.items,
           budgetAccounts,
+          nonce: res.locals.cspNonce as string,
           warning:
             [duplicateSyncIdWarning(budgets), asString(req.query.err)]
               .filter((w): w is string => Boolean(w))
@@ -398,6 +489,7 @@ export function createApp(): Express {
           provider: connection.providerDisplayName ?? connection.providerId ?? connectionId,
           rows: pairing.rows,
           budgetAccounts,
+          nonce: res.locals.cspNonce as string,
           note: pairing.note,
           message: asString(req.query.msg),
           warning:
@@ -472,7 +564,7 @@ export function createApp(): Express {
           removed = result.removed;
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeError(err);
         logger.error('Failed to update pairings:', message);
         res.redirect('/?err=' + encodeURIComponent(message));
         return;
@@ -569,7 +661,7 @@ export function createApp(): Express {
           `${summary.skipped.length} need re-auth, ${summary.errors.length} error(s).`;
         res.redirect('/?msg=' + encodeURIComponent(message));
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeError(err);
         logger.error('Manual sync failed:', message);
         res.redirect('/?err=' + encodeURIComponent(message));
       }

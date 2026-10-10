@@ -81,13 +81,23 @@ SYNC_DAYS_LOOKBACK=7      # how many days back to fetch on first run
 SYNC_INTERVAL_HOURS=0     # 0 = one-shot (use external cron); >0 = built-in loop
 SETUP_PORT=3000
 
+# Logging
+LOG_LEVEL=info            # debug | info | warn | error
+
 # Dashboard / notifications (npm run serve)
 PORT=3000                 # falls back to SETUP_PORT, then 3000
 DASHBOARD_URL=https://truelayer.example.com
+ALLOWED_HOSTS=            # optional: extra dashboard hostnames, comma-separated
 REAUTH_WARN_DAYS=14       # warn/notify when consent expires within this many days
 NTFY_URL=                 # optional: full ntfy topic URL
 HA_WEBHOOK_URL=           # optional: Home Assistant webhook URL
 ```
+
+> **Dashboard access:** to block DNS-rebinding, the dashboard only answers requests whose
+> `Host` is an IP, `localhost`, a single-label name (`nas`), a `.local`/`.lan`/`.home.arpa`/
+> `.ts.net` name, or the `DASHBOARD_URL` host. To reach it by any other hostname (e.g. your
+> own domain through a proxy that preserves `Host`), list it in `ALLOWED_HOSTS`,
+> comma-separated. Anything else gets a 403 naming the rejected host.
 
 > **Important:** `@actual-app/api` must match your Actual server version. It is pinned to a
 > concrete release in `package.json` (not `latest`) so `npm ci` stays reproducible. To upgrade

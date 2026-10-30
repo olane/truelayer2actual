@@ -45,7 +45,7 @@ Runs as a Docker container. Supports one-shot mode (triggered by external cron) 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/jasmucrai/truelayer2actual.git
+git clone https://github.com/olane/truelayer2actual.git
 cd truelayer2actual
 npm install
 ```

@@ -254,7 +254,12 @@ function hostKey(value: string | undefined, bareHost: boolean): string | undefin
   if (!value) return undefined;
   try {
     const url = new URL(bareHost && !value.includes('://') ? `http://${value}` : value);
-    return url.host.toLowerCase().replace(/\.$/, '');
+    const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+    // Treat :80/:443 as default regardless of scheme: the Host header carries no
+    // scheme, so a proxy forwarding `Host: dash.example.com:443` must match an
+    // `https://dash.example.com` Origin.
+    const port = url.port && url.port !== '80' && url.port !== '443' ? `:${url.port}` : '';
+    return hostname + port;
   } catch {
     return undefined;
   }
@@ -268,7 +273,8 @@ function hostKey(value: string | undefined, bareHost: boolean): string | undefin
  * substitute for it.
  */
 function originAllowed(req: Request): boolean {
-  // Browsers send this on every request. Only a genuine same-origin request is
+  // Browsers send this to potentially trustworthy origins; plain-HTTP LAN
+  // clients may omit it. When present, only a genuine same-origin request is
   // trusted: `same-site` covers sibling subdomains and `none`/`cross-site` are
   // never a legitimate dashboard form submission.
   const fetchSite = req.headers['sec-fetch-site'];

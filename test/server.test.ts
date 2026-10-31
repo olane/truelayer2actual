@@ -153,19 +153,64 @@ describe('dashboard security headers', () => {
     }
   });
 
-  it('allows a matching Origin + same-origin, ignoring case and DASHBOARD_URL path', async () => {
+  it('rejects same-site even when the Origin matches the request host', async () => {
+    process.env.DASHBOARD_URL = 'https://dash.olane.dev';
+    try {
+      const res = await request('/sync', {
+        method: 'POST',
+        headers: {
+          Host: 'dash.olane.dev',
+          Origin: 'https://dash.olane.dev',
+          'Sec-Fetch-Site': 'same-site',
+        },
+        body: '',
+      });
+      assert.equal(res.status, 403);
+    } finally {
+      delete process.env.DASHBOARD_URL;
+    }
+  });
+
+  it('matches Origin against Host case-insensitively', async () => {
+    const res = await request('/pair', {
+      method: 'POST',
+      headers: {
+        Host: 'NAS.LOCAL',
+        Origin: 'http://nas.local',
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: '',
+    });
+    // Reaches the route and rejects the empty body rather than blocking at the gate.
+    assert.notEqual(res.status, 403);
+    assert.equal(res.status, 400);
+  });
+
+  it('matches Host with a default port or trailing dot', async () => {
+    const res = await request('/pair', {
+      method: 'POST',
+      headers: {
+        Host: 'NAS.LOCAL.:443',
+        Origin: 'https://nas.local',
+        'Sec-Fetch-Site': 'same-origin',
+      },
+      body: '',
+    });
+    assert.notEqual(res.status, 403);
+    assert.equal(res.status, 400);
+  });
+
+  it('allows an Origin matching DASHBOARD_URL when the request Host differs', async () => {
     process.env.DASHBOARD_URL = 'https://DASH.OLANE.DEV/dashboard/';
     try {
       const res = await request('/pair', {
         method: 'POST',
         headers: {
-          Host: 'DASH.OLANE.DEV',
           Origin: 'https://dash.olane.dev',
           'Sec-Fetch-Site': 'same-origin',
         },
         body: '',
       });
-      // Reaches the route and rejects the empty body rather than blocking at the gate.
       assert.notEqual(res.status, 403);
       assert.equal(res.status, 400);
     } finally {

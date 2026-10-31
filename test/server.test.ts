@@ -117,6 +117,84 @@ describe('dashboard security headers', () => {
     assert.equal(res.status, 403);
   });
 
+  it('rejects a POST whose Origin is a different site', async () => {
+    const res = await request('/sync', {
+      method: 'POST',
+      headers: { Origin: 'https://evil.example' },
+      body: '',
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects a POST marked cross-site by Sec-Fetch-Site', async () => {
+    const res = await request('/sync', {
+      method: 'POST',
+      headers: { 'Sec-Fetch-Site': 'cross-site' },
+      body: '',
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('rejects a same-site sibling Origin instead of trusting same-site', async () => {
+    process.env.DASHBOARD_URL = 'https://dash.olane.dev/dashboard/';
+    try {
+      const res = await request('/sync', {
+        method: 'POST',
+        headers: {
+          Host: 'dash.olane.dev',
+          Origin: 'https://evil.olane.dev',
+          'Sec-Fetch-Site': 'same-site',
+        },
+        body: '',
+      });
+      assert.equal(res.status, 403);
+    } finally {
+      delete process.env.DASHBOARD_URL;
+    }
+  });
+
+  it('allows a matching Origin + same-origin, ignoring case and DASHBOARD_URL path', async () => {
+    process.env.DASHBOARD_URL = 'https://DASH.OLANE.DEV/dashboard/';
+    try {
+      const res = await request('/pair', {
+        method: 'POST',
+        headers: {
+          Host: 'DASH.OLANE.DEV',
+          Origin: 'https://dash.olane.dev',
+          'Sec-Fetch-Site': 'same-origin',
+        },
+        body: '',
+      });
+      // Reaches the route and rejects the empty body rather than blocking at the gate.
+      assert.notEqual(res.status, 403);
+      assert.equal(res.status, 400);
+    } finally {
+      delete process.env.DASHBOARD_URL;
+    }
+  });
+
+  it('rejects an opaque Origin (null)', async () => {
+    const res = await request('/sync', {
+      method: 'POST',
+      headers: { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' },
+      body: '',
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it('still serves GET requests with cross-site headers', async () => {
+    const res = await request('/', {
+      headers: { Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' },
+    });
+    assert.equal(res.status, 200);
+  });
+
+  it('allows a POST with no Origin (curl/non-browser)', async () => {
+    const res = await request('/pair', { method: 'POST', body: '' });
+    assert.notEqual(res.status, 403);
+    assert.equal(res.status, 400);
+  });
+
   it('keeps /healthz reachable whatever the Host, without leaking ids', async () => {
     const res = await request('/healthz', { headers: { Host: 'anything.example.com' } });
     assert.equal(res.status, 200);

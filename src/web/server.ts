@@ -245,35 +245,44 @@ export function hostAllowed(hostHeader: string | undefined): boolean {
 }
 
 /**
- * CSRF hardening for the unauthenticated state-changing POST routes: reject
- * requests whose Origin is neither the request host nor DASHBOARD_URL. Requests
- * without an Origin (curl, older clients) are allowed; this is defence in depth
- * on top of the proxy's LAN/basic-auth control, not a substitute for it.
+ * Normalise a Host header or URL into a lowercase `host[:port]` for comparison.
+ * Host headers are bare (`example.com:3000`), while Origin/DASHBOARD_URL values
+ * are absolute URLs. Malformed values, including `Origin: null`, return
+ * undefined.
+ */
+function hostKey(value: string | undefined, bareHost: boolean): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(bareHost && !value.includes('://') ? `http://${value}` : value);
+    return url.host.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * CSRF hardening for the unauthenticated state-changing routes: reject requests
+ * whose Origin is neither the request host nor DASHBOARD_URL. Requests without
+ * an Origin (curl, scripts, older clients) are allowed by design; this is
+ * defence in depth on top of the proxy's LAN/basic-auth control, not a
+ * substitute for it.
  */
 function originAllowed(req: Request): boolean {
-  // Modern browsers always send this on cross-site requests; `cross-site`
-  // means the initiating page lives on another registrable domain.
+  // Browsers send this on every request. Only a genuine same-origin request is
+  // trusted: `same-site` covers sibling subdomains and `none`/`cross-site` are
+  // never a legitimate dashboard form submission.
   const fetchSite = req.headers['sec-fetch-site'];
-  if (typeof fetchSite === 'string' && fetchSite === 'cross-site') return false;
+  if (typeof fetchSite === 'string' && fetchSite.toLowerCase() !== 'same-origin') {
+    return false;
+  }
 
   const origin = req.headers.origin;
   if (!origin) return true;
-  let originHost: string;
-  try {
-    originHost = new URL(origin).host;
-  } catch {
-    return false;
-  }
-  if (originHost === req.headers.host) return true;
-  const dashboard = process.env.DASHBOARD_URL;
-  if (dashboard) {
-    try {
-      if (new URL(dashboard).host === originHost) return true;
-    } catch {
-      // ignore malformed DASHBOARD_URL
-    }
-  }
-  return false;
+  const originHost = hostKey(origin, false);
+  if (!originHost) return false;
+  if (originHost === hostKey(req.headers.host, true)) return true;
+  const dashboardHost = hostKey(process.env.DASHBOARD_URL, false);
+  return Boolean(dashboardHost && originHost === dashboardHost);
 }
 
 export function createApp(): Express {
@@ -330,9 +339,12 @@ export function createApp(): Express {
       );
   });
 
+  // Every current state-changing route is a POST; apply the check to all
+  // non-safe methods so a future PUT/PATCH/DELETE route is covered by default.
+  const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
   app.use((req, res, next) => {
-    if (req.method === 'POST' && !originAllowed(req)) {
-      logger.warn('Rejected cross-origin POST:', req.headers.origin ?? '(none)', req.path);
+    if (!safeMethods.has(req.method) && !originAllowed(req)) {
+      logger.warn('Rejected cross-origin request:', req.method, req.headers.origin ?? '(none)', req.path);
       res
         .status(403)
         .send(messagePage('Forbidden', 'Cross-origin request rejected.', { error: true }));
